@@ -21,9 +21,9 @@ jobs:
       - name: Run checks
         run: python3 -m unittest discover -s tests -v
       - name: Lint maintained Python sources
-        uses: astral-sh/ruff-action@146cd51f235777a9bc491eead18e0d5a4b05406a # v3
-        with:
-          args: check nextflow/bin tests
+        run: |
+          python3 -m pip install ruff==0.16.4
+          ruff check nextflow/bin tests
 
   nextflow-stub:
     runs-on: ubuntu-latest
