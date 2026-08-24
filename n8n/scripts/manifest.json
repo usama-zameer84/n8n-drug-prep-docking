@@ -21,7 +21,7 @@
       "node_id": "pydock-auto-receptor",
       "language": "python",
       "file": "scripts/python/03_auto_select_receptor.py",
-      "source_sha256": "c6fcd39354c8d060d5e61c5d0f37743472b7ac1d0c94961e9adc3db38cdf7402"
+      "source_sha256": "8bec53dbd6ca4014d1ece4e61c686a757313047870e0449f72876104a87211cc"
     },
     {
       "node": "Generate 3D Structure",
@@ -49,7 +49,7 @@
       "node_id": "pydock-protprep",
       "language": "python",
       "file": "scripts/python/07_prepare_protein.py",
-      "source_sha256": "51969455f887cba24d499165ef780d8119a00a88117f3ce43fc5f3e05ee1f319"
+      "source_sha256": "4773d693d2599573ec2ba3c9bf3aa9c094d30aff630f61aa3d9d2712397633cc"
     },
     {
       "node": "Run Docking",

@@ -1,8 +1,12 @@
-# n8n workflow
+# Ligand Docking Workbench - n8n
 
 This directory contains the importable n8n workflow, its exported Code-node sources, and
 example inputs. A Google Drive trigger starts one ligand-preparation and docking run, then the
 workflow uploads the reports and structural MD handoff to a configured Drive folder.
+
+> **Python runner required:** this workflow uses native Python Code nodes. Run it on a
+> self-hosted n8n installation configured with a separate Python task runner; the n8n service
+> alone is not sufficient.
 
 Docking scores rank predicted poses. They do not prove binding or measure experimental
 affinity. The MD handoff is structural and still needs force-field parameters, topology,
@@ -36,8 +40,10 @@ flowchart LR
 
 ## Requirements
 
-Use self-hosted n8n with a Python task runner. The n8n service and task runner must share a
-writable `/md_project/data` directory.
+Use self-hosted n8n with a Python task runner. The runner is a separate process or container
+that executes the workflow's Python Code nodes. The n8n service and task runner must share a
+writable `/md_project/data` directory; installing Python only inside the n8n service does not
+meet this requirement.
 
 The task runner needs:
 

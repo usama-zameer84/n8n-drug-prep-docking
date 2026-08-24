@@ -16,7 +16,7 @@ def get_json(url, payload=None, attempts=3):
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "nextflow-drug-prep-docking/1.0 receptor-selection",
+        "User-Agent": "ligand-docking-workbench/1.0 receptor-selection",
     }
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
     last = None

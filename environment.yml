@@ -1,4 +1,4 @@
-name: n8n-drug-prep-docking
+name: ligand-docking-workbench
 channels:
   - conda-forge
   - bioconda

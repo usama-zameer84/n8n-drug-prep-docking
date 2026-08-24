@@ -22,7 +22,7 @@ def run(_items):
     mode = d.get("receptor_selection_mode", "auto")
 
     def get_json(url, payload=None, attempts=3):
-        headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "n8n-drug-prep-docking/3.0 receptor-selection"}
+        headers = {"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "ligand-docking-workbench/3.0 receptor-selection"}
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         last_error = None
         for attempt in range(attempts):

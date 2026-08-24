@@ -1,8 +1,15 @@
-# Drug Preparation and Docking
+# Ligand Docking Workbench
 
-This repository prepares a small-molecule ligand, selects or accepts a receptor, runs
-rigid-receptor docking with AutoDock Vina, writes an HTML report set, and creates a structural
-handoff for later molecular-dynamics setup.
+Molecular docking asks a practical question: how might a small molecule sit inside a protein
+pocket? A docking program tries different poses and ranks them by score. That makes docking
+useful for comparing possible binding modes and deciding what to examine next, but a good score
+does not prove that binding happens in the lab.
+
+Getting to that score takes more work than running one command. The ligand and receptor need to
+be checked and prepared, file formats have to match, the search box must be defined, and every
+result needs enough context to be reviewed later. Ligand Docking Workbench connects those steps.
+It prepares one ligand, selects or accepts a receptor, runs AutoDock Vina, and collects the
+poses, checks, reports, and structural MD handoff in one reproducible run.
 
 There are two entry points:
 
@@ -13,6 +20,11 @@ There are two entry points:
 
 Each run handles one ligand. `replicas` repeats docking for that ligand; it does not submit
 several ligands.
+
+The n8n workflow requires a separate Python task runner. A self-hosted n8n service by itself
+cannot execute the workflow's native Python Code nodes. The runner must have the scientific
+environment installed and share `/md_project/data` with the n8n service. See the
+[`n8n` setup guide](n8n/README.md#requirements) for the complete runner requirements.
 
 This is a research workflow. Docking scores rank predicted poses. They do not establish
 binding, efficacy, safety, or clinical usefulness. The MD handoff contains structures and
@@ -48,6 +60,9 @@ nextflow -version
 ```
 
 If a shell alias overrides the conda Python, run `unalias python` and check `which python`.
+
+For n8n, install this environment on the Python task-runner host or in its container. Installing
+the environment only on the n8n service is not sufficient.
 
 ## Input formats
 

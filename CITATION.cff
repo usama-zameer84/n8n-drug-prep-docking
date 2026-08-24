@@ -1,11 +1,11 @@
 cff-version: 1.2.0
 message: "If you use this workflow, cite this repository and the underlying scientific software."
-title: "Drug Preparation and Docking"
+title: "Ligand Docking Workbench"
 type: software
 authors:
   - family-names: "Zameer"
     given-names: "Usama"
-repository-code: "https://github.com/usama-zameer84/n8n-drug-prep-docking"
+repository-code: "https://github.com/usama-zameer84/ligand-docking-workbench"
 license: MIT
 version: 1.0.0
 date-released: 2026-08-24

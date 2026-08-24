@@ -88,7 +88,7 @@ def main():
                 cu,
                 headers={
                     "Accept": "application/json",
-                    "User-Agent": "nextflow-drug-prep-docking/1.0 pocket-selection",
+                    "User-Agent": "ligand-docking-workbench/1.0 pocket-selection",
                 },
             )
             with urllib.request.urlopen(req, timeout=25) as r:

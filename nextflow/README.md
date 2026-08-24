@@ -1,4 +1,4 @@
-# Nextflow workflow
+# Ligand Docking Workbench - Nextflow
 
 The Nextflow workflow prepares and docks one ligand per run. It accepts a SMILES file, selects
 or validates a receptor, runs AutoDock Vina, publishes an HTML report package, and writes a

@@ -67,7 +67,7 @@ def run(_items):
         component_name = residue.name
         try:
             component_url = "https://data.rcsb.org/rest/v1/core/chemcomp/" + urllib.parse.quote(residue.name)
-            req = urllib.request.Request(component_url, headers={"Accept": "application/json", "User-Agent": "n8n-drug-prep-docking/3.0 pocket-selection"})
+            req = urllib.request.Request(component_url, headers={"Accept": "application/json", "User-Agent": "ligand-docking-workbench/3.0 pocket-selection"})
             with urllib.request.urlopen(req, timeout=25) as response:
                 component_data = json.load(response)
             descriptor = component_data.get("rcsb_chem_comp_descriptor") or {}
