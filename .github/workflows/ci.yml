@@ -23,7 +23,7 @@ jobs:
       - name: Lint maintained Python sources
         run: |
           python3 -m pip install ruff==0.16.4
-          ruff check nextflow/bin tests
+          ruff check --select E4,E7,E9,F nextflow/bin tests
 
   nextflow-stub:
     runs-on: ubuntu-latest
