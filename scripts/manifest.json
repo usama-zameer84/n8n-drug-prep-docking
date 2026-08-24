@@ -1,0 +1,125 @@
+{
+  "workflow": "workflow/drug-prep-docking.workflow.json",
+  "code_node_count": 17,
+  "nodes": [
+    {
+      "node": "Attach Drive Metadata",
+      "node_id": "pydock-drive-metadata",
+      "language": "javascript",
+      "file": "scripts/javascript/01_attach_drive_metadata.js",
+      "source_sha256": "5de50056a5f1b3154b0f1c0608de337439c58bcec0942f1a0bf2694069144079"
+    },
+    {
+      "node": "Normalize Input",
+      "node_id": "pydock-normalize",
+      "language": "python",
+      "file": "scripts/python/02_normalize_input.py",
+      "source_sha256": "8f53e960f6d123213324e622bef0ad805bc54a6c0e272dc0464e6dffad341eae"
+    },
+    {
+      "node": "Auto Select Receptor",
+      "node_id": "pydock-auto-receptor",
+      "language": "python",
+      "file": "scripts/python/03_auto_select_receptor.py",
+      "source_sha256": "c6fcd39354c8d060d5e61c5d0f37743472b7ac1d0c94961e9adc3db38cdf7402"
+    },
+    {
+      "node": "Generate 3D Structure",
+      "node_id": "pydock-gen3d",
+      "language": "python",
+      "file": "scripts/python/04_generate_3d_structure.py",
+      "source_sha256": "90af1c4da934ee702fd35e4494efa4ce06dd7235489c2085a4799a2c391a6f3e"
+    },
+    {
+      "node": "Analyze Ligand (Ro5)",
+      "node_id": "pydock-analyzelig",
+      "language": "python",
+      "file": "scripts/python/05_analyze_ligand_ro5.py",
+      "source_sha256": "7bdcd50012306f5d39b468fff19288d9da83eb0d11e7387e06375acb80dcc937"
+    },
+    {
+      "node": "Convert to PDBQT",
+      "node_id": "pydock-ligprep",
+      "language": "python",
+      "file": "scripts/python/06_convert_to_pdbqt.py",
+      "source_sha256": "b2222d5baa521e23625e69e21b5fd14952731690977d4055ef923895175348e5"
+    },
+    {
+      "node": "Prepare Protein",
+      "node_id": "pydock-protprep",
+      "language": "python",
+      "file": "scripts/python/07_prepare_protein.py",
+      "source_sha256": "51969455f887cba24d499165ef780d8119a00a88117f3ce43fc5f3e05ee1f319"
+    },
+    {
+      "node": "Run Docking",
+      "node_id": "pydock-docking",
+      "language": "python",
+      "file": "scripts/python/08_run_docking.py",
+      "source_sha256": "9477119244508dd782f57400ae1b709b5bde836ae7c9ce75db14a0c66145f890"
+    },
+    {
+      "node": "Parse Results",
+      "node_id": "pydock-parse",
+      "language": "python",
+      "file": "scripts/python/09_parse_results.py",
+      "source_sha256": "5c0f16cfdb7165f92f24b93c7b0cba7224ae21f35c7c313d7395f0e151b68d77"
+    },
+    {
+      "node": "Analyze Interactions",
+      "node_id": "pydock-interactions",
+      "language": "python",
+      "file": "scripts/python/10_analyze_interactions.py",
+      "source_sha256": "b2973c4b27698922f5d89c6af18bc694bac2a5eb8bb6e9d8afa82b7eb18dab80"
+    },
+    {
+      "node": "Build MD Handoff Bundle",
+      "node_id": "pydock-md-bundle",
+      "language": "python",
+      "file": "scripts/python/11_build_md_handoff_bundle.py",
+      "source_sha256": "77bf677b4316cabbe70a1e917217324d7e406809466753e1ec2f8e4c2bd055a5"
+    },
+    {
+      "node": "Generate Reports",
+      "node_id": "pydock-reports",
+      "language": "python",
+      "file": "scripts/python/12_generate_reports.py",
+      "source_sha256": "8b2e2a24f942c58b4d71b9da5a5d4e9013cdcd993df6a2eccff2ab70d4a50394"
+    },
+    {
+      "node": "Build Scientific Report Package",
+      "node_id": "pydock-scientific-reports",
+      "language": "python",
+      "file": "scripts/python/13_build_scientific_report_package.py",
+      "source_sha256": "f57bb0fa228517a3f09c4281d546f2dc3f767d2682d8312f0a3aa1fedd91c5b3"
+    },
+    {
+      "node": "Prepare MD Handoff Files",
+      "node_id": "pydock-md-prepfiles",
+      "language": "javascript",
+      "file": "scripts/javascript/14_prepare_md_handoff_files.js",
+      "source_sha256": "5bdc1f3047b2de5ff911489d10b1f9ab6bb41eb9149225c816117262091bea86"
+    },
+    {
+      "node": "Prepare Report Files",
+      "node_id": "pydock-prepfiles",
+      "language": "javascript",
+      "file": "scripts/javascript/15_prepare_report_files.js",
+      "source_sha256": "71b21250d47b1ed7d612fc7a6bdc0609898b5ecdf24284e544a8043a1fc74f12"
+    },
+    {
+      "node": "Build Final Summary",
+      "node_id": "pydock-final-summary",
+      "language": "javascript",
+      "file": "scripts/javascript/16_build_final_summary.js",
+      "source_sha256": "60db91351493ff629ad26b97a1aa9753c24d8f2f414470bbbdb8db14077a2d95"
+    },
+    {
+      "node": "Cleanup Run Workspace",
+      "node_id": "pydock-cleanup",
+      "language": "python",
+      "file": "scripts/python/17_cleanup_run_workspace.py",
+      "source_sha256": "826a81e5b2225d1472cc1441c09799de52742bdcc928c244cef9377babb54c3e"
+    }
+  ]
+}

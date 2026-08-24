@@ -1,0 +1,15 @@
+{
+  "smiles": "Cn1c(=O)c2c(ncn2C)n(C)c1=O",
+  "ligand_name": "caffeine",
+  "receptor_selection_mode": "provided",
+  "pdb_id": "9H37",
+  "chain_ids": ["A"],
+  "size_x": 20,
+  "size_y": 20,
+  "size_z": 20,
+  "ph": 7.4,
+  "exhaustiveness": 8,
+  "num_modes": 9,
+  "replicas": 1,
+  "seed": 20260826
+}

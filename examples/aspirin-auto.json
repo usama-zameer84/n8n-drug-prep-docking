@@ -1,0 +1,12 @@
+{
+  "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
+  "ligand_name": "aspirin",
+  "receptor_selection_mode": "auto",
+  "target_organism": "Homo sapiens",
+  "target_similarity_threshold": 70,
+  "target_candidate_limit": 5,
+  "exhaustiveness": 8,
+  "num_modes": 9,
+  "replicas": 1,
+  "seed": 20260825
+}

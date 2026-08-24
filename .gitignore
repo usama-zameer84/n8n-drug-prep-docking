@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+.mcp.json
+credentials.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+output/
+reports/
+md_project/
+*.log

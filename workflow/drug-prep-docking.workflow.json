@@ -1,0 +1,814 @@
+{
+  "name": "Drug Preparation and Docking with Automatic Receptor Selection",
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport os\nimport re\nimport shutil\nimport tempfile\nimport time\n\nj = _items[0][\"json\"]\nraw = str(j.get(\"data\", \"\")).strip()\nif not raw:\n    raise ValueError(\"Drive input is empty\")\nname = str(j.get(\"source_file_name\") or \"drive-input.txt\")\next = os.path.splitext(name.lower())[1]\nif ext not in (\".txt\", \".smi\", \".smiles\", \".json\"):\n    raise ValueError(\"Unsupported Drive input extension \" + ext + \"; use .txt, .smi, .smiles, or .json\")\nis_json = raw.lstrip().startswith(\"{\")\nif is_json:\n    try:\n        data = json.loads(raw)\n    except json.JSONDecodeError as exc:\n        raise ValueError(\"Invalid JSON input: \" + str(exc))\n    if not isinstance(data, dict):\n        raise ValueError(\"JSON input must be one object\")\nelse:\n    data = {}\n    for line in raw.splitlines():\n        line = line.strip()\n        if line and not line.startswith(\"#\"):\n            data[\"smiles\"] = line.split()[0]\n            data[\"ligand_name\"] = \" \".join(line.split()[1:]) or \"test_ligand\"\n            break\nsmiles = str(data.get(\"smiles\", \"\")).strip()\nif not smiles:\n    raise ValueError(\"Missing required field: smiles\")\nif len(smiles) > 1000:\n    raise ValueError(\"SMILES exceeds the 1000-character safety limit\")\nif \".\" in smiles and not bool(data.get(\"allow_multicomponent\", False)):\n    raise ValueError(\"Multi-component SMILES are rejected; provide one ligand or explicitly set allow_multicomponent=true\")\npdb_value = str(data.get(\"pdb_id\") or \"\").strip().upper()\nif pdb_value == \"AUTO\":\n    pdb_value = \"\"\nselection_mode = str(data.get(\"receptor_selection_mode\") or (\"provided\" if pdb_value else \"auto\")).strip().lower()\nif selection_mode not in (\"auto\", \"provided\"):\n    raise ValueError(\"receptor_selection_mode must be auto or provided\")\nif selection_mode == \"provided\":\n    if not re.match(r\"^[0-9][A-Z0-9]{3}$\", pdb_value):\n        raise ValueError(\"Provided-receptor mode requires a four-character pdb_id such as 1AKI\")\nelif pdb_value:\n    raise ValueError(\"Set receptor_selection_mode=provided to force a pdb_id, or omit pdb_id for automatic selection\")\npdb_id = pdb_value if selection_mode == \"provided\" else \"\"\ndef number(key, default, low, high):\n    try:\n        value = float(data.get(key, default))\n    except (TypeError, ValueError):\n        raise ValueError(key + \" must be numeric\")\n    if value < low or value > high:\n        raise ValueError(key + \" must be between \" + str(low) + \" and \" + str(high))\n    return value\ndef integer(key, default, low, high):\n    value = number(key, default, low, high)\n    if int(value) != value:\n        raise ValueError(key + \" must be an integer\")\n    return int(value)\ncenter_values = [data.get(\"center_x\"), data.get(\"center_y\"), data.get(\"center_z\")]\nhas_any_center = any(value is not None for value in center_values)\nif has_any_center and not all(value is not None for value in center_values):\n    raise ValueError(\"Provide all of center_x, center_y, and center_z or omit all three\")\ncenter = [number(key, 0, -10000, 10000) for key in (\"center_x\", \"center_y\", \"center_z\")] if has_any_center else [None, None, None]\nsizes = [number(key, 20, 8, 30) for key in (\"size_x\", \"size_y\", \"size_z\")]\nif sizes[0] * sizes[1] * sizes[2] > 27000:\n    raise ValueError(\"Docking box volume exceeds the 27000 A^3 safety limit\")\nchains_raw = data.get(\"chain_ids\", [])\nif isinstance(chains_raw, str):\n    chain_ids = [part.strip() for part in chains_raw.split(\",\") if part.strip()]\nelif isinstance(chains_raw, list):\n    chain_ids = [str(part).strip() for part in chains_raw if str(part).strip()]\nelse:\n    raise ValueError(\"chain_ids must be a comma-separated string or a JSON array\")\nheterogen_policy = str(data.get(\"heterogen_policy\") or \"remove_all\").strip().lower()\nif heterogen_policy not in (\"remove_all\", \"keep_water\"):\n    raise ValueError(\"heterogen_policy must be remove_all or keep_water\")\ntarget_organism = str(data.get(\"target_organism\") or \"Homo sapiens\").strip()\nif not target_organism or len(target_organism) > 100:\n    raise ValueError(\"target_organism must be a non-empty organism name under 100 characters\")\nrun_root = \"/md_project/data/runs\"\nos.makedirs(run_root, exist_ok=True)\nnow = time.time()\nfor entry in os.listdir(run_root):\n    path = os.path.join(run_root, entry)\n    if entry.startswith(\"dock_\") and os.path.isdir(path):\n        try:\n            if now - os.stat(path).st_mtime > 172800:\n                shutil.rmtree(path)\n        except OSError:\n            pass\nrun_dir = tempfile.mkdtemp(prefix=\"dock_\", dir=run_root)\ninput_dir = os.path.join(run_dir, \"input\")\noutput_dir = os.path.join(run_dir, \"output\")\nreports_dir = os.path.join(run_dir, \"reports\")\nfor path in (input_dir, output_dir, reports_dir):\n    os.makedirs(path, exist_ok=True)\nrun_id = os.path.basename(run_dir)\nsafe_name = re.sub(r\"[^A-Za-z0-9_.-]+\", \"_\", str(data.get(\"ligand_name\") or \"ligand\"))[:40].strip(\"_\") or \"ligand\"\nresult = {\n    \"run_id\": run_id,\n    \"run_name\": (pdb_id or \"AUTO\") + \"_\" + safe_name + \"_\" + run_id,\n    \"run_dir\": run_dir,\n    \"input_dir\": input_dir,\n    \"output_dir\": output_dir,\n    \"reports_dir\": reports_dir,\n    \"input_profile\": \"json-production-config\" if is_json else \"plain-smiles-auto-selection\",\n    \"smiles\": smiles,\n    \"ligand_name\": safe_name,\n    \"pdb_id\": pdb_id,\n    \"chain_ids\": chain_ids,\n    \"receptor_selection_mode\": selection_mode,\n    \"target_organism\": target_organism,\n    \"target_similarity_threshold\": number(\"target_similarity_threshold\", 70, 40, 100),\n    \"target_candidate_limit\": integer(\"target_candidate_limit\", 5, 1, 10),\n    \"heterogen_policy\": heterogen_policy,\n    \"add_missing_residues\": bool(data.get(\"add_missing_residues\", False)),\n    \"cx\": center[0], \"cy\": center[1], \"cz\": center[2],\n    \"sx\": sizes[0], \"sy\": sizes[1], \"sz\": sizes[2],\n    \"ph\": number(\"ph\", 7.4, 4, 10),\n    \"exhaustiveness\": integer(\"exhaustiveness\", 8, 8, 64),\n    \"num_modes\": integer(\"num_modes\", 9, 1, 20),\n    \"energy_range\": number(\"energy_range\", 3, 1, 10),\n    \"seed\": integer(\"seed\", 20260824, 1, 2147483647),\n    \"cpu\": integer(\"cpu\", 1, 1, 8),\n    \"replicas\": integer(\"replicas\", 1, 1, 3),\n    \"timeout_seconds\": integer(\"timeout_seconds\", 900, 60, 1800),\n    \"cutoff\": number(\"cutoff\", 4.5, 2.5, 6),\n    \"source_file_id\": j.get(\"source_file_id\"),\n    \"source_file_name\": name,\n    \"source_mime_type\": j.get(\"source_mime_type\"),\n    \"source_modified_time\": j.get(\"source_modified_time\"),\n    \"source_md5\": j.get(\"source_md5\"),\n    \"qc_flags\": [],\n}\nif not has_any_center:\n    result[\"qc_flags\"].append(\"GRID_CENTER_TO_BE_SELECTED_OR_INFERRED\")\nif selection_mode == \"auto\":\n    result[\"qc_flags\"].append(\"AUTOMATED_RECEPTOR_SELECTION_REQUIRES_REVIEW\")\nif not is_json:\n    result[\"qc_flags\"].append(\"PLAIN_SMILES_DEFAULTS_USED\")\nreturn [{\"json\": result}]"
+      },
+      "id": "pydock-normalize",
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        16
+      ],
+      "notes": "Parses Google Drive SMILES/JSON, supports automatic or supplied receptor modes, validates bounded parameters, and creates an isolated run workspace."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import os\nimport subprocess\nimport sys\nfrom rdkit import Chem\nfrom rdkit.Chem import AllChem\nfrom rdkit.Chem.Draw import rdMolDraw2D\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\nmol = Chem.MolFromSmiles(d[\"smiles\"])\nif mol is None:\n    raise ValueError(\"RDKit rejected the SMILES\")\nif len(Chem.GetMolFrags(mol)) != 1:\n    raise ValueError(\"Exactly one ligand molecule is required\")\n\ncanonical = Chem.MolToSmiles(mol, isomericSmiles=True)\ninchi_proc = subprocess.run([\n    sys.executable, \"-c\",\n    \"from rdkit import Chem; import sys; print(Chem.MolToInchiKey(Chem.MolFromSmiles(sys.argv[1])))\",\n    d[\"smiles\"],\n], capture_output=True, text=True, timeout=30)\nif inchi_proc.returncode != 0 or not inchi_proc.stdout.strip():\n    raise ValueError(\"RDKit InChIKey generation failed: \" + inchi_proc.stderr[-500:])\ninchi_key = inchi_proc.stdout.strip()\nmol_h = Chem.AddHs(mol)\nembed_status = AllChem.EmbedMolecule(\n    mol_h,\n    randomSeed=int(d[\"seed\"]),\n    enforceChirality=True,\n    useExpTorsionAnglePrefs=True,\n    useBasicKnowledge=True,\n    useSmallRingTorsions=True,\n    useMacrocycleTorsions=True,\n    ETversion=2,\n)\nif embed_status != 0:\n    raise ValueError(\"RDKit ETKDGv3 3D embedding failed\")\n\nif AllChem.MMFFHasAllMoleculeParams(mol_h):\n    force_field = \"MMFF94s\"\n    optimize_status = AllChem.MMFFOptimizeMolecule(mol_h, mmffVariant=\"MMFF94s\", maxIters=1000)\nelif AllChem.UFFHasAllMoleculeParams(mol_h):\n    force_field = \"UFF_FALLBACK\"\n    optimize_status = AllChem.UFFOptimizeMolecule(mol_h, maxIters=1000)\nelse:\n    raise ValueError(\"No MMFF94s or UFF parameters are available for this ligand\")\nif optimize_status < 0:\n    raise ValueError(force_field + \" optimization failed\")\n\nmol_h.SetProp(\"_Name\", d[\"ligand_name\"])\nmol_h.SetProp(\"canonical_isomeric_smiles\", canonical)\nmol_h.SetProp(\"inchi_key\", inchi_key)\nChem.MolToMolFile(mol_h, os.path.join(out_dir, \"ligand_input.sdf\"))\n\nAllChem.Compute2DCoords(mol)\ndrawer = rdMolDraw2D.MolDraw2DSVG(560, 420)\nrdMolDraw2D.PrepareAndDrawMolecule(drawer, mol)\ndrawer.FinishDrawing()\nwith open(os.path.join(out_dir, \"ligand_2d.svg\"), \"w\") as fh:\n    fh.write(drawer.GetDrawingText())\n\nout = dict(d)\nout[\"canonical_smiles\"] = canonical\nout[\"inchi_key\"] = inchi_key\nout[\"num_atoms\"] = mol_h.GetNumAtoms()\nout[\"num_heavy_atoms\"] = mol_h.GetNumHeavyAtoms()\nout[\"conformer_generation\"] = {\n    \"method\": \"RDKit ETKDGv3-equivalent keyword configuration\",\n    \"random_seed\": d[\"seed\"],\n    \"force_field\": force_field,\n    \"optimization_status\": optimize_status,\n    \"optimization_converged\": optimize_status == 0,\n}\nif optimize_status > 0:\n    out[\"qc_flags\"] = list(out[\"qc_flags\"]) + [\"LIGAND_OPTIMIZATION_DID_NOT_FULLY_CONVERGE\"]\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-gen3d",
+      "name": "Generate 3D Structure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        16
+      ],
+      "notes": "Deterministic ETKDGv3 conformer generation with a recorded seed and force-field convergence state."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "from rdkit import Chem\nfrom rdkit.Chem import Crippen\nfrom rdkit.Chem import Descriptors\nfrom rdkit.Chem import Lipinski\nfrom rdkit.Chem import rdMolDescriptors\n\nd = _items[0][\"json\"]\nmol = Chem.MolFromSmiles(d[\"canonical_smiles\"])\ndescriptors = {\n    \"molecular_weight\": round(Descriptors.MolWt(mol), 3),\n    \"logp\": round(Crippen.MolLogP(mol), 3),\n    \"tpsa\": round(rdMolDescriptors.CalcTPSA(mol), 3),\n    \"h_bond_donors\": Lipinski.NumHDonors(mol),\n    \"h_bond_acceptors\": Lipinski.NumHAcceptors(mol),\n    \"rotatable_bonds\": Lipinski.NumRotatableBonds(mol),\n    \"formal_charge\": Chem.GetFormalCharge(mol),\n    \"aromatic_rings\": rdMolDescriptors.CalcNumAromaticRings(mol),\n    \"heavy_atoms\": mol.GetNumHeavyAtoms(),\n    \"fraction_csp3\": round(rdMolDescriptors.CalcFractionCSP3(mol), 3),\n}\nviolations = []\nif descriptors[\"molecular_weight\"] > 500: violations.append(\"MW > 500\")\nif descriptors[\"logp\"] > 5: violations.append(\"logP > 5\")\nif descriptors[\"h_bond_donors\"] > 5: violations.append(\"HBD > 5\")\nif descriptors[\"h_bond_acceptors\"] > 10: violations.append(\"HBA > 10\")\nout = dict(d)\nout[\"ligand_analysis\"] = {\n    \"descriptors\": descriptors,\n    \"lipinski_rule_of_five_violations\": violations,\n    \"ro5_pass\": len(violations) == 0,\n    \"interpretation_limit\": \"Rule-of-five descriptors are filters, not efficacy, safety, or binding evidence.\",\n}\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-analyzelig",
+      "name": "Analyze Ligand (Ro5)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        16
+      ],
+      "notes": "Computes descriptive ligand properties; it does not predict efficacy, safety, or affinity."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import os\nimport meeko\nfrom rdkit import Chem\nfrom meeko import MoleculePreparation\nfrom meeko import PDBQTWriterLegacy\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\nsdf_path = os.path.join(out_dir, \"ligand_input.sdf\")\nmol = next(iter(Chem.SDMolSupplier(sdf_path, removeHs=False)), None)\nif mol is None:\n    raise ValueError(\"Cannot read the deterministic ligand SDF\")\npreparator = MoleculePreparation()\nsetups = preparator.prepare(mol)\nif len(setups) != 1:\n    raise ValueError(\"Meeko must produce exactly one ligand setup\")\nresult = PDBQTWriterLegacy.write_string(setups[0])\nif isinstance(result, tuple):\n    pdbqt_text, is_ok, error_message = result\n    if not is_ok:\n        raise ValueError(\"Meeko ligand preparation failed: \" + str(error_message))\nelse:\n    pdbqt_text = result\nif \"REMARK SMILES\" not in pdbqt_text:\n    raise ValueError(\"Meeko PDBQT is missing the SMILES atom-mapping remarks required for lossless pose export\")\npdbqt_path = os.path.join(out_dir, \"ligand.pdbqt\")\nwith open(pdbqt_path, \"w\") as fh:\n    fh.write(pdbqt_text)\nout = dict(d)\nout[\"ligand_prep\"] = {\n    \"method\": \"Meeko MoleculePreparation/PDBQTWriterLegacy\",\n    \"meeko_version\": str(getattr(meeko, \"__version__\", \"unknown\")),\n    \"charge_model\": \"Meeko default Gasteiger\",\n    \"smiles_mapping_present\": True,\n}\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-ligprep",
+      "name": "Convert to PDBQT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        16
+      ],
+      "notes": "Official Meeko ligand preparation with embedded SMILES atom mapping for chemically correct pose export."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport os\nimport subprocess\nimport sys\nimport urllib.request\nimport urllib.parse\nimport meeko\nimport rdkit\nimport openmm\nfrom pdbfixer import PDBFixer\nfrom openmm.app import PDBFile\nfrom openmm import unit\nfrom rdkit import Chem, DataStructs\n\nd = _items[0][\"json\"]\ninput_dir = d[\"input_dir\"]\nout_dir = d[\"output_dir\"]\nsource_cif = os.path.join(input_dir, d[\"pdb_id\"] + \".cif\")\nurl = \"https://files.rcsb.org/download/\" + d[\"pdb_id\"] + \".cif\"\ntry:\n    with urllib.request.urlopen(url, timeout=120) as response:\n        source_bytes = response.read()\nexcept Exception as exc:\n    raise ValueError(\"RCSB mmCIF download failed for \" + d[\"pdb_id\"] + \": \" + str(exc))\nif len(source_bytes) < 500:\n    raise ValueError(\"RCSB returned an unexpectedly small mmCIF file\")\nwith open(source_cif, \"wb\") as fh:\n    fh.write(source_bytes)\n\nfixer = PDBFixer(filename=source_cif)\nchains = list(fixer.topology.chains())\navailable_chains = [chain.id or str(index) for index, chain in enumerate(chains)]\nprotein_names = set((\"ALA ARG ASN ASP CYS GLN GLU GLY HIS ILE LEU LYS MET PHE PRO SER THR TRP TYR VAL ASX GLX SEC PYL DA DC DG DT A C G U\".split()))\nwater_names = set((\"HOH WAT H2O DOD\".split()))\nheterogens = []\nwaters = []\nfor residue in fixer.topology.residues():\n    item = {\"name\": residue.name, \"chain\": residue.chain.id, \"id\": residue.id}\n    if residue.name in water_names:\n        waters.append(item)\n    elif residue.name not in protein_names:\n        heterogens.append(item)\n\nbinding_site_candidates = []\nquery_mol = Chem.MolFromSmiles(d[\"smiles\"])\nquery_fp = Chem.RDKFingerprint(query_mol) if query_mol is not None else None\nexcluded_components = set((\"HOH WAT H2O DOD NA CL K CA MG MN ZN FE CU CO NI CD HG SO4 PO4 NO3 NH4 GOL EDO PEG PG4 DMS ACT ACE\".split()))\nfor residue in fixer.topology.residues():\n    if residue.name in protein_names or residue.name in water_names or residue.name in excluded_components:\n        continue\n    heavy_atoms = [atom for atom in residue.atoms() if atom.element is not None and atom.element.symbol != \"H\"]\n    if len(heavy_atoms) < 5:\n        continue\n    coordinates_A = []\n    for atom in heavy_atoms:\n        point = fixer.positions[atom.index].value_in_unit(unit.angstrom)\n        coordinates_A.append([float(point.x), float(point.y), float(point.z)])\n    similarity = None\n    component_smiles = None\n    component_name = residue.name\n    try:\n        component_url = \"https://data.rcsb.org/rest/v1/core/chemcomp/\" + urllib.parse.quote(residue.name)\n        req = urllib.request.Request(component_url, headers={\"Accept\": \"application/json\", \"User-Agent\": \"n8n-drug-prep-docking/3.0 pocket-selection\"})\n        with urllib.request.urlopen(req, timeout=25) as response:\n            component_data = json.load(response)\n        descriptor = component_data.get(\"rcsb_chem_comp_descriptor\") or {}\n        component_smiles = descriptor.get(\"SMILES_stereo\") or descriptor.get(\"SMILES\")\n        component_name = (component_data.get(\"chem_comp\") or {}).get(\"name\") or residue.name\n        component_mol = Chem.MolFromSmiles(component_smiles) if component_smiles else None\n        if query_fp is not None and component_mol is not None:\n            similarity = float(DataStructs.TanimotoSimilarity(query_fp, Chem.RDKFingerprint(component_mol)))\n    except Exception:\n        pass\n    center_A = [sum(row[index] for row in coordinates_A) / len(coordinates_A) for index in range(3)]\n    binding_site_candidates.append({\n        \"component_id\": residue.name,\n        \"component_name\": component_name,\n        \"chain\": residue.chain.id,\n        \"residue_id\": residue.id,\n        \"heavy_atom_count\": len(heavy_atoms),\n        \"query_similarity\": round(similarity, 4) if similarity is not None else None,\n        \"center_A\": [round(value, 3) for value in center_A],\n        \"component_smiles\": component_smiles,\n    })\nbinding_site_candidates.sort(key=lambda item: (-(item[\"query_similarity\"] if item[\"query_similarity\"] is not None else -1.0), -item[\"heavy_atom_count\"], item[\"component_id\"]))\nbinding_site_reference = None\nif binding_site_candidates:\n    binding_site_reference = dict(binding_site_candidates[0])\n    binding_site_reference[\"selection_method\"] = \"Highest RDKit fingerprint similarity between the query ligand and eligible co-crystallized non-polymer components; heavy-atom count breaks ties.\"\n    binding_site_reference[\"candidate_count\"] = len(binding_site_candidates)\n\nif d[\"chain_ids\"]:\n    missing_chains = [chain for chain in d[\"chain_ids\"] if chain not in available_chains]\n    if missing_chains:\n        raise ValueError(\"Requested chains not present: \" + \",\".join(missing_chains) + \"; available: \" + \",\".join(available_chains))\n    remove_indices = [index for index, chain in enumerate(chains) if (chain.id or str(index)) not in d[\"chain_ids\"]]\n    if remove_indices:\n        fixer.removeChains(remove_indices)\n\nfixer.findMissingResidues()\nmissing_residues_detected = {str(key): list(value) for key, value in fixer.missingResidues.items()}\nif not d[\"add_missing_residues\"]:\n    fixer.missingResidues = {}\nfixer.findNonstandardResidues()\nnonstandard = [{\"name\": residue.name, \"chain\": residue.chain.id, \"id\": residue.id, \"replacement\": replacement}\n               for residue, replacement in (fixer.nonstandardResidues or [])]\nfixer.replaceNonstandardResidues()\nfixer.removeHeterogens(keepWater=d[\"heterogen_policy\"] == \"keep_water\")\nfixer.findMissingAtoms()\nmissing_atoms_count = sum(len(atoms) for atoms in fixer.missingAtoms.values())\nmissing_terminals_count = sum(len(atoms) for atoms in fixer.missingTerminals.values())\nfixer.addMissingAtoms()\nfixer.addMissingHydrogens(float(d[\"ph\"]))\n\nprepared_pdb = os.path.join(out_dir, \"prepared_receptor.pdb\")\nwith open(prepared_pdb, \"w\") as fh:\n    PDBFile.writeFile(fixer.topology, fixer.positions, fh, keepIds=True)\n\nreceptor_pdbqt = os.path.join(out_dir, \"receptor.pdbqt\")\nreceptor_json = os.path.join(out_dir, \"receptor.json\")\nprep_cmd = [\n    sys.executable, \"-m\", \"meeko.cli.mk_prepare_receptor\",\n    \"--read_pdb\", prepared_pdb,\n    \"--write_pdbqt\", receptor_pdbqt,\n    \"--write_json\", receptor_json,\n    \"--charge_model\", \"gasteiger\",\n    \"--allow_bad_res\",\n]\ntry:\n    proc = subprocess.run(prep_cmd, capture_output=True, text=True, timeout=300)\nexcept subprocess.TimeoutExpired:\n    raise ValueError(\"Meeko receptor preparation exceeded 300 seconds\")\nprep_log = (proc.stdout or \"\") + \"\\n\" + (proc.stderr or \"\")\nwith open(os.path.join(out_dir, \"receptor_prep.log\"), \"w\") as fh:\n    fh.write(prep_log)\nif proc.returncode != 0 or not os.path.exists(receptor_pdbqt) or os.path.getsize(receptor_pdbqt) == 0:\n    raise ValueError(\"Official Meeko receptor preparation failed: \" + prep_log[-1600:])\n\ndef sha256(path):\n    result = subprocess.run([\"sha256sum\", path], capture_output=True, text=True, timeout=30)\n    if result.returncode != 0:\n        raise ValueError(\"sha256sum failed for \" + path)\n    return result.stdout.split()[0]\n\natom_count = 0\nresidue_keys = set()\nwith open(prepared_pdb) as fh:\n    for line in fh:\n        if line.startswith((\"ATOM\", \"HETATM\")):\n            atom_count += 1\n            residue_keys.add((line[21:22], line[22:27], line[17:20]))\n\nstats = {\n    \"source\": {\n        \"pdb_id\": d[\"pdb_id\"],\n        \"format\": \"PDBx/mmCIF\",\n        \"url\": url,\n        \"sha256\": sha256(source_cif),\n        \"drive_input_file_id\": d.get(\"source_file_id\"),\n        \"drive_input_file_name\": d.get(\"source_file_name\"),\n    },\n    \"available_chains\": available_chains,\n    \"selected_chains\": d[\"chain_ids\"] or available_chains,\n    \"heterogen_policy\": d[\"heterogen_policy\"],\n    \"non_water_heterogens_detected\": heterogens,\n    \"waters_detected\": len(waters),\n    \"missing_residues_detected\": missing_residues_detected,\n    \"missing_residues_built\": d[\"add_missing_residues\"],\n    \"nonstandard_replacements\": nonstandard,\n    \"missing_atoms_added\": missing_atoms_count,\n    \"missing_terminal_atoms_added\": missing_terminals_count,\n    \"prepared_atom_count\": atom_count,\n    \"prepared_residue_count\": len(residue_keys),\n    \"ph\": d[\"ph\"],\n    \"receptor_pdbqt_method\": \"Meeko mk_prepare_receptor --read_pdb\",\n    \"charge_model\": \"gasteiger\",\n    \"meeko_receptor_options\": [\"--allow_bad_res\"],\n    \"binding_site_reference\": binding_site_reference,\n    \"binding_site_candidates\": binding_site_candidates,\n    \"versions\": {\n        \"meeko\": str(getattr(meeko, \"__version__\", \"unknown\")),\n        \"rdkit\": str(getattr(rdkit, \"__version__\", \"unknown\")),\n        \"openmm\": str(getattr(openmm, \"__version__\", \"unknown\")),\n    },\n}\nwith open(os.path.join(out_dir, \"protein_stats.json\"), \"w\") as fh:\n    json.dump(stats, fh, indent=2)\n\nqc = [flag for flag in d[\"qc_flags\"] if flag != \"GRID_CENTER_TO_BE_SELECTED_OR_INFERRED\"]\nqc.append(\"MEEKO_ALLOW_BAD_RES_USED_REQUIRES_REVIEW\")\nif d[\"cx\"] is None:\n    if binding_site_reference:\n        qc.append(\"GRID_CENTER_FROM_COCRYSTALLIZED_LIGAND_REQUIRES_REVIEW\")\n    else:\n        qc.append(\"AUTO_CENTER_NOT_SCIENTIFICALLY_VALIDATED\")\nif heterogens:\n    qc.append(\"NON_WATER_HETEROGENS_REMOVED_EXPLICITLY\")\nif waters and d[\"heterogen_policy\"] == \"remove_all\":\n    qc.append(\"CRYSTAL_WATERS_REMOVED_EXPLICITLY\")\nif missing_residues_detected and not d[\"add_missing_residues\"]:\n    qc.append(\"MISSING_RESIDUES_NOT_MODELLED\")\nif d[\"add_missing_residues\"] and missing_residues_detected:\n    qc.append(\"MODELLED_MISSING_RESIDUES_REQUIRE_REVIEW\")\nout = dict(d)\nout[\"qc_flags\"] = sorted(set(qc))\nout[\"protein_stats\"] = stats\nout[\"receptor_source_path\"] = source_cif\nout[\"prepared_receptor_path\"] = prepared_pdb\nout[\"auto_grid_center\"] = binding_site_reference[\"center_A\"] if d[\"cx\"] is None and binding_site_reference else None\nout[\"grid_center_source\"] = (\"user_supplied\" if d[\"cx\"] is not None else (\"co_crystallized_ligand:\" + binding_site_reference[\"component_id\"] if binding_site_reference else \"receptor_centroid_fallback\"))\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-protprep",
+      "name": "Prepare Protein",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        16
+      ],
+      "notes": "Downloads source mmCIF, applies explicit chain/heterogen policies with PDBFixer, then uses official Meeko receptor preparation. No Open Babel fallback."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport math\nimport os\nimport re\nimport shutil\nimport subprocess\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\nreceptor_path = os.path.join(out_dir, \"receptor.pdbqt\")\nligand_path = os.path.join(out_dir, \"ligand.pdbqt\")\n\ndef coordinates(path):\n    values = []\n    with open(path) as fh:\n        for line in fh:\n            if line.startswith((\"ATOM\", \"HETATM\")):\n                try:\n                    values.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))\n                except ValueError:\n                    pass\n    if not values:\n        raise ValueError(\"Prepared receptor has no readable coordinates\")\n    return values\n\ncoords = coordinates(receptor_path)\nmins = [min(row[i] for row in coords) for i in range(3)]\nmaxs = [max(row[i] for row in coords) for i in range(3)]\nauto = d[\"cx\"] is None\nif not auto:\n    center = [d[\"cx\"], d[\"cy\"], d[\"cz\"]]\n    center_source = \"user_supplied\"\nelif d.get(\"auto_grid_center\"):\n    center = [float(value) for value in d[\"auto_grid_center\"]]\n    center_source = d.get(\"grid_center_source\") or \"co_crystallized_ligand\"\nelse:\n    center = [sum(row[i] for row in coords) / len(coords) for i in range(3)]\n    center_source = \"receptor_centroid_fallback\"\nsize = [d[\"sx\"], d[\"sy\"], d[\"sz\"]]\noverlaps = [\n    center[i] + size[i] / 2 >= mins[i] and center[i] - size[i] / 2 <= maxs[i]\n    for i in range(3)\n]\nif not all(overlaps):\n    raise ValueError(\"Docking box does not overlap the receptor on all three axes; verify center and size\")\n\nvina_path = \"/usr/local/bin/vina\"\nif not os.path.exists(vina_path):\n    raise ValueError(\"AutoDock Vina is not installed at /usr/local/bin/vina\")\nversion_proc = subprocess.run([vina_path, \"--version\"], capture_output=True, text=True, timeout=30)\nvina_version = ((version_proc.stdout or \"\") + \" \" + (version_proc.stderr or \"\")).strip()\n\nscore_pattern = re.compile(r\"^\\s*(\\d+)\\s+(-?\\d+(?:\\.\\d+)?)\\s+(\\d+(?:\\.\\d+)?)\\s+(\\d+(?:\\.\\d+)?)\\s*$\")\nreplica_runs = []\nfor replica in range(d[\"replicas\"]):\n    replica_seed = int(d[\"seed\"]) + replica\n    pose_path = os.path.join(out_dir, \"docked_replica_\" + str(replica + 1) + \".pdbqt\")\n    log_path = os.path.join(out_dir, \"vina_replica_\" + str(replica + 1) + \".log\")\n    cmd = [\n        vina_path,\n        \"--receptor\", receptor_path,\n        \"--ligand\", ligand_path,\n        \"--center_x\", str(center[0]), \"--center_y\", str(center[1]), \"--center_z\", str(center[2]),\n        \"--size_x\", str(size[0]), \"--size_y\", str(size[1]), \"--size_z\", str(size[2]),\n        \"--exhaustiveness\", str(d[\"exhaustiveness\"]),\n        \"--num_modes\", str(d[\"num_modes\"]),\n        \"--energy_range\", str(d[\"energy_range\"]),\n        \"--seed\", str(replica_seed),\n        \"--cpu\", str(d[\"cpu\"]),\n        \"--out\", pose_path,\n    ]\n    try:\n        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=d[\"timeout_seconds\"])\n    except subprocess.TimeoutExpired:\n        raise ValueError(\"Vina replica \" + str(replica + 1) + \" exceeded timeout_seconds\")\n    log_text = (proc.stdout or \"\") + \"\\n\" + (proc.stderr or \"\")\n    with open(log_path, \"w\") as fh:\n        fh.write(log_text)\n    if proc.returncode != 0:\n        raise ValueError(\"Vina replica \" + str(replica + 1) + \" failed: \" + log_text[-1600:])\n    scores = []\n    for line in log_text.splitlines():\n        match = score_pattern.match(line)\n        if match:\n            scores.append({\n                \"rank\": int(match.group(1)),\n                \"affinity_kcal_mol\": float(match.group(2)),\n                \"rmsd_lb_A\": float(match.group(3)),\n                \"rmsd_ub_A\": float(match.group(4)),\n            })\n    if not scores:\n        raise ValueError(\"No Vina score table found for replica \" + str(replica + 1))\n    replica_runs.append({\n        \"replica\": replica + 1,\n        \"seed\": replica_seed,\n        \"pose_path\": pose_path,\n        \"log_path\": log_path,\n        \"poses\": scores,\n        \"top_affinity_kcal_mol\": scores[0][\"affinity_kcal_mol\"],\n    })\n\nbest = min(replica_runs, key=lambda item: item[\"top_affinity_kcal_mol\"])\nshutil.copyfile(best[\"pose_path\"], os.path.join(out_dir, \"docked.pdbqt\"))\ncombined_log = \"\\n\\n\".join(\"=== REPLICA \" + str(item[\"replica\"]) + \" SEED \" + str(item[\"seed\"]) + \" ===\\n\" + open(item[\"log_path\"]).read() for item in replica_runs)\nwith open(os.path.join(out_dir, \"docking.log\"), \"w\") as fh:\n    fh.write(combined_log)\n\nout = dict(d)\nout[\"grid_center\"] = [round(value, 3) for value in center]\nout[\"grid_size\"] = size\nout[\"grid_auto_centered\"] = auto\nout[\"grid_center_source\"] = center_source\nout[\"receptor_bounds\"] = {\"min\": [round(v, 3) for v in mins], \"max\": [round(v, 3) for v in maxs]}\nout[\"vina_version\"] = vina_version\nout[\"replica_runs\"] = replica_runs\nout[\"selected_replica\"] = best[\"replica\"]\nif center_source == \"receptor_centroid_fallback\":\n    out[\"qc_flags\"] = sorted(set(list(out[\"qc_flags\"]) + [\"AUTO_CENTER_NOT_SCIENTIFICALLY_VALIDATED\"]))\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-docking",
+      "name": "Run Docking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        16
+      ],
+      "notes": "Runs AutoDock Vina 1.2.7 with bounded box, recorded seed, modes, energy range, CPU, replicas, and timeout."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport math\nimport os\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\nselected = [item for item in d[\"replica_runs\"] if item[\"replica\"] == d[\"selected_replica\"]][0]\ntop_scores = [item[\"top_affinity_kcal_mol\"] for item in d[\"replica_runs\"]]\nmean = sum(top_scores) / len(top_scores)\nvariance = sum((value - mean) ** 2 for value in top_scores) / len(top_scores)\nresults = {\n    \"status\": \"COMPLETED\",\n    \"score_semantics\": \"AutoDock Vina scoring values in kcal/mol; use for pose ranking, not as experimental affinity or MD free energy.\",\n    \"selected_replica\": d[\"selected_replica\"],\n    \"top_affinity_kcal_mol\": selected[\"top_affinity_kcal_mol\"],\n    \"poses\": selected[\"poses\"],\n    \"num_poses\": len(selected[\"poses\"]),\n    \"replica_top_scores_kcal_mol\": top_scores,\n    \"replica_top_score_mean\": round(mean, 3),\n    \"replica_top_score_stddev\": round(math.sqrt(variance), 3),\n    \"replica_top_score_range\": round(max(top_scores) - min(top_scores), 3),\n    \"convergence_note\": \"Replica score spread is descriptive only; structural clustering and experimental validation are still required.\",\n}\nwith open(os.path.join(out_dir, \"docking_results.json\"), \"w\") as fh:\n    json.dump(results, fh, indent=2)\nout = dict(d)\nout[\"docking_results\"] = results\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-parse",
+      "name": "Parse Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        16
+      ],
+      "notes": "Parses selected-pose ranks and descriptive cross-replica score spread without treating scores as experimental affinity."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport math\nimport os\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\ncutoff = float(d[\"cutoff\"])\n\ntype_to_element = {\n    \"C\": \"C\", \"A\": \"C\", \"N\": \"N\", \"NA\": \"N\", \"NS\": \"N\",\n    \"O\": \"O\", \"OA\": \"O\", \"OS\": \"O\", \"S\": \"S\", \"SA\": \"S\",\n    \"P\": \"P\", \"F\": \"F\", \"Cl\": \"Cl\", \"Br\": \"Br\", \"I\": \"I\",\n    \"HD\": \"H\", \"H\": \"H\", \"Mg\": \"Mg\", \"Mn\": \"Mn\", \"Zn\": \"Zn\", \"Ca\": \"Ca\", \"Fe\": \"Fe\",\n}\n\ndef atom_from_line(line):\n    parts = line.split()\n    ad_type = parts[-1] if parts else \"\"\n    name = line[12:16].strip()\n    return {\n        \"name\": name,\n        \"resname\": line[17:20].strip(),\n        \"chain\": line[21:22].strip() or \"_\",\n        \"resseq\": line[22:27].strip(),\n        \"x\": float(line[30:38]), \"y\": float(line[38:46]), \"z\": float(line[46:54]),\n        \"ad_type\": ad_type,\n        \"element\": type_to_element.get(ad_type, (line[76:78].strip() or name[:1])),\n    }\n\ndef read_atoms(path, first_model=False):\n    atoms = []\n    in_model = not first_model\n    with open(path) as fh:\n        for line in fh:\n            if first_model and line.startswith(\"MODEL\"):\n                in_model = True\n                continue\n            if first_model and line.startswith(\"ENDMDL\"):\n                break\n            if in_model and line.startswith((\"ATOM\", \"HETATM\")):\n                try:\n                    atoms.append(atom_from_line(line))\n                except (ValueError, IndexError):\n                    pass\n    return atoms\n\nreceptor = read_atoms(os.path.join(out_dir, \"receptor.pdbqt\"))\nligand = read_atoms(os.path.join(out_dir, \"docked.pdbqt\"), first_model=True)\nif not ligand:\n    raise ValueError(\"Best Vina pose contains no atoms\")\n\nby_residue = {}\nfor lig_atom in ligand:\n    if lig_atom[\"element\"] == \"H\":\n        continue\n    for rec_atom in receptor:\n        if rec_atom[\"element\"] == \"H\":\n            continue\n        distance = math.sqrt(\n            (lig_atom[\"x\"] - rec_atom[\"x\"]) ** 2 +\n            (lig_atom[\"y\"] - rec_atom[\"y\"]) ** 2 +\n            (lig_atom[\"z\"] - rec_atom[\"z\"]) ** 2\n        )\n        if distance > cutoff:\n            continue\n        if distance < 2.2:\n            category = \"very_close_contact_check_for_clash\"\n        elif lig_atom[\"element\"] in (\"N\", \"O\", \"S\") and rec_atom[\"element\"] in (\"N\", \"O\", \"S\") and distance <= 3.5:\n            category = \"polar_distance_candidate_requires_angle_check\"\n        else:\n            category = \"heavy_atom_distance_contact\"\n        residue_key = rec_atom[\"resname\"] + \":\" + rec_atom[\"chain\"] + \":\" + rec_atom[\"resseq\"]\n        by_residue.setdefault(residue_key, []).append({\n            \"category\": category,\n            \"distance_A\": round(distance, 3),\n            \"ligand_atom\": lig_atom[\"name\"],\n            \"ligand_element\": lig_atom[\"element\"],\n            \"receptor_atom\": rec_atom[\"name\"],\n            \"receptor_element\": rec_atom[\"element\"],\n        })\n\nrows = []\nfor residue, contacts in by_residue.items():\n    contacts.sort(key=lambda item: item[\"distance_A\"])\n    rows.append({\n        \"residue\": residue,\n        \"minimum_distance_A\": contacts[0][\"distance_A\"],\n        \"contact_count\": len(contacts),\n        \"contacts\": contacts[:20],\n    })\nrows.sort(key=lambda item: item[\"minimum_distance_A\"])\nsummary = {\n    \"status\": \"CONTACTS_DETECTED_NOT_VALIDATED\",\n    \"method\": \"Heavy-atom Euclidean distance screening on the selected rigid-receptor Vina pose.\",\n    \"cutoff_A\": cutoff,\n    \"ligand_docked_atom_count\": len(ligand),\n    \"contact_residue_count\": len(rows),\n    \"residues\": rows[:40],\n    \"limitations\": [\n        \"Polar candidates are not hydrogen-bond assignments because donor state and D-H-A angle are not evaluated.\",\n        \"No water bridges, pi stacking geometry, metal coordination, entropy, dynamics, or free-energy calculation is included.\",\n        \"Very close contacts must be inspected for steric clashes and preparation errors.\",\n    ],\n}\nwith open(os.path.join(out_dir, \"interactions.json\"), \"w\") as fh:\n    json.dump(summary, fh, indent=2)\nout = dict(d)\nout[\"interactions_summary\"] = summary\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-interactions",
+      "name": "Analyze Interactions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        16
+      ],
+      "notes": "Reports transparent distance contacts only; no unvalidated hydrogen-bond or binding claims."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport os\n\nd = _items[0][\"json\"]\nrecord = {\n    \"run\": {\n        \"run_id\": d[\"run_id\"],\n        \"run_name\": d[\"run_name\"],\n        \"input_profile\": d[\"input_profile\"],\n        \"source_drive_file_id\": d.get(\"source_file_id\"),\n        \"source_drive_file_name\": d.get(\"source_file_name\"),\n        \"qc_flags\": d[\"qc_flags\"],\n    },\n    \"ligand\": {\n        \"input_smiles\": d[\"smiles\"],\n        \"canonical_isomeric_smiles\": d[\"canonical_smiles\"],\n        \"inchi_key\": d[\"inchi_key\"],\n        \"atom_counts\": {\"all\": d[\"num_atoms\"], \"heavy\": d[\"num_heavy_atoms\"]},\n        \"conformer_generation\": d[\"conformer_generation\"],\n        \"preparation\": d[\"ligand_prep\"],\n        \"properties\": d[\"ligand_analysis\"],\n    },\n    \"receptor\": d[\"protein_stats\"],\n    \"receptor_selection\": d.get(\"receptor_selection\", {}),\n    \"docking_configuration\": {\n        \"vina_version\": d[\"vina_version\"],\n        \"grid_center_A\": d[\"grid_center\"],\n        \"grid_size_A\": d[\"grid_size\"],\n        \"grid_auto_centered\": d[\"grid_auto_centered\"],\n        \"grid_center_source\": d.get(\"grid_center_source\"),\n        \"binding_site_reference\": d[\"protein_stats\"].get(\"binding_site_reference\"),\n        \"receptor_bounds_A\": d[\"receptor_bounds\"],\n        \"exhaustiveness\": d[\"exhaustiveness\"],\n        \"num_modes\": d[\"num_modes\"],\n        \"energy_range_kcal_mol\": d[\"energy_range\"],\n        \"cpu\": d[\"cpu\"],\n        \"replica_seeds\": [item[\"seed\"] for item in d[\"replica_runs\"]],\n        \"timeout_seconds\": d[\"timeout_seconds\"],\n    },\n    \"docking_results\": d[\"docking_results\"],\n    \"distance_contacts\": d[\"interactions_summary\"],\n    \"md_handoff\": d[\"md_handoff\"],\n    \"scientific_scope\": {\n        \"completed\": \"Ligand/receptor preparation, rigid-receptor AutoDock Vina docking, ranked pose export, distance-contact screening, structural MD handoff.\",\n        \"not_completed\": \"Experimental validation, flexible-receptor/ensemble docking, topology generation, solvation, ions, minimization, NVT/NPT, production MD, convergence, MM/PBSA, alchemical free energy.\",\n    },\n}\nrecord_path = os.path.join(d[\"output_dir\"], \"report_data.json\")\nwith open(record_path, \"w\") as fh:\n    json.dump(record, fh, indent=2)\nout = dict(d)\nout[\"report_data\"] = record\nout[\"report_data_path\"] = record_path\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-reports",
+      "name": "Generate Reports",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1728,
+        16
+      ],
+      "notes": "Builds the machine-readable scientific record used by every report."
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $json.run_name }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_REPORTS_PARENT_FOLDER_ID",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "pydock-gd-folder",
+      "name": "Create Run Folder (Drive)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2176,
+        16
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Creates one run-specific folder under the Docking Reports parent folder."
+    },
+    {
+      "parameters": {
+        "jsCode": "const summary = $('Build Scientific Report Package').first().json;\nconst folder = $('Create Run Folder (Drive)').first().json;\nif (!folder.id) throw new Error('Google Drive run folder was not created');\nif (!summary.reports_b64 || !Object.keys(summary.reports_b64).length) throw new Error('Report package is empty');\nreturn Object.entries(summary.reports_b64).map(([fileName, fileB64]) => ({\n  json: {\n    fileName,\n    folderId: folder.id,\n    fileB64,\n    mimeType: fileName.endsWith('.html') ? 'text/html' : fileName.endsWith('.sdf') ? 'chemical/x-mdl-sdfile' : fileName.endsWith('.pdb') ? 'chemical/x-pdb' : 'application/json',\n  }\n}));"
+      },
+      "id": "pydock-prepfiles",
+      "name": "Prepare Report Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3296,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "fileB64",
+        "options": {
+          "fileName": "={{ $json.fileName }}",
+          "mimeType": "={{ $json.mimeType }}"
+        }
+      },
+      "id": "pydock-tobinary",
+      "name": "Reports To Binary",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        3520,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $binary.data.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $('Create Run Folder (Drive)').first().json.id }}",
+          "mode": "id",
+          "cachedResultName": "Current run folder"
+        },
+        "options": {}
+      },
+      "id": "pydock-gd-upload",
+      "name": "Upload Reports (Drive)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3744,
+        16
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_DRIVE_INPUT_FOLDER_ID",
+          "mode": "id"
+        },
+        "event": "fileCreated",
+        "options": {
+          "fileType": "all"
+        }
+      },
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1408,
+        16
+      ],
+      "id": "gdrive-trigger-smiles-drop",
+      "name": "SMILES Drop (Drive Trigger)"
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id",
+          "cachedResultName": "Triggered Drive input"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -1184,
+        16
+      ],
+      "id": "gdrive-download-smiles-file",
+      "name": "Download SMILES File (Drive)",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "text",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        -960,
+        16
+      ],
+      "id": "extract-smiles-text",
+      "name": "Extract SMILES Text"
+    },
+    {
+      "parameters": {
+        "jsCode": "const science = $('Build Scientific Report Package').first().json;\nconst folder = $('Create Run Folder (Drive)').first().json;\nconst mdFolder = $('Create MD Handoff Folder').first().json;\nconst reportFiles = $('Upload Reports (Drive)').all().map(({ json }) => ({\n  id: json.id,\n  name: json.name,\n  mimeType: json.mimeType,\n  url: json.webViewLink || `https://drive.google.com/file/d/${json.id}/view`,\n}));\nconst mdFiles = $('Upload MD Handoff Files').all().map(({ json }) => ({\n  id: json.id,\n  name: json.name,\n  mimeType: json.mimeType,\n  url: json.webViewLink || `https://drive.google.com/file/d/${json.id}/view`,\n}));\nreturn [{ json: {\n  ...science.report_summary,\n  run_dir: science.run_dir,\n  input_dir: science.input_dir,\n  output_dir: science.output_dir,\n  reports_dir: science.reports_dir,\n  drive: {\n    folderId: folder.id,\n    folderName: folder.name,\n    folderUrl: `https://drive.google.com/drive/folders/${folder.id}`,\n    reportFiles,\n  },\n  md_handoff: {\n    status: 'STRUCTURAL_HANDOFF_ONLY_NOT_TOPOLOGY_READY',\n    folderId: mdFolder.id,\n    folderName: mdFolder.name,\n    folderUrl: `https://drive.google.com/drive/folders/${mdFolder.id}`,\n    files: mdFiles,\n    chemistryAuthority: 'best_pose_ligand.sdf',\n    warning: 'No force-field topology, solvent, ions, equilibration, trajectory, or MD result is included.',\n  },\n} }];"
+      },
+      "id": "pydock-final-summary",
+      "name": "Build Final Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3968,
+        16
+      ],
+      "notes": "Returns a concise Drive manifest and cleanup inputs without carrying base64 payloads forward."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import base64\nimport subprocess\nimport time\nimport json\nimport os\nimport shutil\n\nd = _items[0][\"json\"]\nr = d[\"report_data\"]\nout_dir = d[\"output_dir\"]\n\nesc = lambda value: (str(value).replace(\"&\", \"&amp;\").replace(\"<\", \"&lt;\")\n                     .replace(\">\", \"&gt;\").replace('\"', \"&quot;\"))\njson_pre = lambda value: \"<pre>\" + esc(json.dumps(value, indent=2)) + \"</pre>\"\ntable = lambda rows: \"<table>\" + \"\".join(\"<tr><th>\" + esc(key) + \"</th><td>\" + esc(value) + \"</td></tr>\" for key, value in rows) + \"</table>\"\n\nstyle = \"\"\"\n:root{color-scheme:light;font-family:Inter,system-ui,sans-serif;color:#172033;background:#f4f7fb}\nbody{max-width:1120px;margin:0 auto;padding:28px}header{background:#102a43;color:white;padding:24px;border-radius:14px}\nnav{margin:18px 0;padding:14px;background:white;border-radius:10px}nav a{margin-right:14px}\nsection,.card{background:white;margin:16px 0;padding:20px;border-radius:12px;box-shadow:0 2px 10px #183b5620}\ntable{border-collapse:collapse;width:100%}th,td{padding:9px;border-bottom:1px solid #d9e2ec;text-align:left;vertical-align:top}\nth{width:34%;color:#334e68}code,pre{background:#eef2f7;padding:3px 6px;border-radius:5px}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px}\n.warn{border-left:5px solid #d97706;background:#fff7ed;padding:12px}.bad{border-left:5px solid #b91c1c;background:#fef2f2;padding:12px}\n.ok{border-left:5px solid #15803d;background:#f0fdf4;padding:12px}.muted{color:#627d98}.score{font-size:2rem;font-weight:700}\nul{line-height:1.55}svg{max-width:100%;height:auto}\n\"\"\"\n\nnames = [\n    (\"index.html\", \"Index\"),\n    (\"01_input_provenance.html\", \"Input & provenance\"),\n    (\"02_ligand_preparation.html\", \"Ligand preparation\"),\n    (\"03_receptor_preparation.html\", \"Receptor preparation\"),\n    (\"03a_receptor_selection.html\", \"Receptor selection findings\"),\n    (\"04_docking_results.html\", \"Docking results\"),\n    (\"05_distance_contacts.html\", \"Distance contacts\"),\n    (\"06_methods_qc.html\", \"Methods & QC\"),\n    (\"07_md_handoff_readiness.html\", \"MD handoff readiness\"),\n    (\"08_raw_data.html\", \"Raw data\"),\n    (\"09_visualization.html\", \"3D visualization\"),\n]\nnav = \"<nav>\" + \"\".join(\"<a href='\" + file_name + \"'>\" + label + \"</a>\" for file_name, label in names) + \"</nav>\"\n\npage = lambda title, body: \"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>\" + esc(title) + \"</title><style>\" + style + \"</style></head><body><header><h1>\" + esc(title) + \"</h1><div>Run \" + esc(r[\"run\"][\"run_id\"]) + \"</div></header>\" + nav + body + \"</body></html>\"\n\ntop = r[\"docking_results\"][\"top_affinity_kcal_mol\"]\nflags = r[\"run\"][\"qc_flags\"]\nindex_body = \"<section><h2>Outcome</h2><div class='score'>\" + esc(top) + \" kcal/mol</div><p>Best AutoDock Vina score for the selected replica. This is a ranking signal, not measured affinity and not MD free energy.</p></section>\"\nindex_body += \"<section><h2>Identity</h2>\" + table([\n    (\"Ligand\", r[\"ligand\"][\"canonical_isomeric_smiles\"]),\n    (\"InChIKey\", r[\"ligand\"][\"inchi_key\"]),\n    (\"Receptor\", r[\"receptor\"][\"source\"][\"pdb_id\"]),\n    (\"Receptor selection mode\", (r.get(\"receptor_selection\") or {}).get(\"mode\")),\n    (\"Selected target\", ((r.get(\"receptor_selection\") or {}).get(\"selected\") or {}).get(\"target_name\")),\n    (\"Selected chains\", \", \".join(r[\"receptor\"][\"selected_chains\"])),\n    (\"Run ID\", r[\"run\"][\"run_id\"]),\n]) + \"</section>\"\nindex_body += \"<section><h2>QC flags</h2>\" + (\"<div class='ok'>No workflow QC flags.</div>\" if not flags else \"<div class='warn'><ul>\" + \"\".join(\"<li>\" + esc(flag) + \"</li>\" for flag in flags) + \"</ul></div>\") + \"</section>\"\nindex_body += \"<section><h2>What this run establishes</h2><p>\" + esc(r[\"scientific_scope\"][\"completed\"]) + \"</p><h3>What it does not establish</h3><p>\" + esc(r[\"scientific_scope\"][\"not_completed\"]) + \"</p></section>\"\n\ninput_body = \"<section><h2>Google Drive source</h2>\" + table([\n    (\"Source file ID\", r[\"run\"][\"source_drive_file_id\"]),\n    (\"Source file name\", r[\"run\"][\"source_drive_file_name\"]),\n    (\"Input profile\", r[\"run\"][\"input_profile\"]),\n    (\"Run ID\", r[\"run\"][\"run_id\"]),\n]) + \"</section><section><h2>Ligand/receptor request</h2>\" + table([\n    (\"Input SMILES\", r[\"ligand\"][\"input_smiles\"]),\n    (\"Canonical isomeric SMILES\", r[\"ligand\"][\"canonical_isomeric_smiles\"]),\n    (\"Receptor selection mode\", (r.get(\"receptor_selection\") or {}).get(\"mode\")),\n    (\"PDB ID\", r[\"receptor\"][\"source\"][\"pdb_id\"]),\n    (\"RCSB URL\", r[\"receptor\"][\"source\"][\"url\"]),\n    (\"Source mmCIF SHA-256\", r[\"receptor\"][\"source\"][\"sha256\"]),\n]) + \"</section>\"\n\nlig_body = \"<section><h2>Deterministic 3D preparation</h2>\" + table([\n    (\"Method\", r[\"ligand\"][\"conformer_generation\"][\"method\"]),\n    (\"Random seed\", r[\"ligand\"][\"conformer_generation\"][\"random_seed\"]),\n    (\"Force field\", r[\"ligand\"][\"conformer_generation\"][\"force_field\"]),\n    (\"Optimization converged\", r[\"ligand\"][\"conformer_generation\"][\"optimization_converged\"]),\n    (\"PDBQT method\", r[\"ligand\"][\"preparation\"][\"method\"]),\n    (\"Meeko version\", r[\"ligand\"][\"preparation\"][\"meeko_version\"]),\n    (\"SMILES mapping retained\", r[\"ligand\"][\"preparation\"][\"smiles_mapping_present\"]),\n]) + \"</section><section><h2>Descriptors</h2>\" + table(list(r[\"ligand\"][\"properties\"][\"descriptors\"].items())) + \"<p class='muted'>\" + esc(r[\"ligand\"][\"properties\"][\"interpretation_limit\"]) + \"</p></section>\"\ntry:\n    with open(os.path.join(out_dir, \"ligand_2d.svg\")) as fh:\n        lig_body += \"<section><h2>2D structure</h2>\" + fh.read() + \"</section>\"\nexcept OSError:\n    pass\n\nrec = r[\"receptor\"]\nrec_body = \"<section><h2>Source and selection</h2>\" + table([\n    (\"Source format\", rec[\"source\"][\"format\"]),\n    (\"Available chains\", \", \".join(rec[\"available_chains\"])),\n    (\"Selected chains\", \", \".join(rec[\"selected_chains\"])),\n    (\"Heterogen policy\", rec[\"heterogen_policy\"]),\n    (\"Waters detected\", rec[\"waters_detected\"]),\n    (\"Non-water heterogens detected\", len(rec[\"non_water_heterogens_detected\"])),\n]) + \"</section><section><h2>Repair and preparation QC</h2>\" + table([\n    (\"Missing residue segments detected\", len(rec[\"missing_residues_detected\"])),\n    (\"Missing residues built\", rec[\"missing_residues_built\"]),\n    (\"Missing atoms added\", rec[\"missing_atoms_added\"]),\n    (\"Missing terminal atoms added\", rec[\"missing_terminal_atoms_added\"]),\n    (\"Prepared residues\", rec[\"prepared_residue_count\"]),\n    (\"Prepared atoms\", rec[\"prepared_atom_count\"]),\n    (\"Hydrogen pH\", rec[\"ph\"]),\n    (\"PDBQT method\", rec[\"receptor_pdbqt_method\"]),\n    (\"Charge model\", rec[\"charge_model\"]),\n]) + \"</section><section><h2>Binding-site reference</h2>\" + json_pre(rec.get(\"binding_site_reference\")) + \"</section><section><h2>Detected non-water heterogens</h2>\" + json_pre(rec[\"non_water_heterogens_detected\"]) + \"</section>\"\n\nselection = r.get(\"receptor_selection\") or {}\nselected_receptor = selection.get(\"selected\") or {}\ncandidate_targets = selection.get(\"candidate_targets\") or []\ntarget_rows = \"\"\nfor index, candidate in enumerate(candidate_targets, 1):\n    best_structure = candidate.get(\"best_structure\") or {}\n    target_rows += \"<tr><td>\" + esc(index) + \"</td><td>\" + esc(candidate.get(\"target_name\")) + \"</td><td>\" + esc(candidate.get(\"target_chembl_id\")) + \"</td><td>\" + esc(candidate.get(\"uniprot_accession\")) + \"</td><td>\" + esc(candidate.get(\"max_similarity_percent\")) + \"</td><td>\" + esc(candidate.get(\"evidence_records\")) + \"</td><td>\" + esc(candidate.get(\"max_pchembl\")) + \"</td><td>\" + esc(best_structure.get(\"pdb_id\")) + \"</td><td>\" + esc(best_structure.get(\"resolution_A\")) + \"</td><td>\" + esc(candidate.get(\"evidence_score\")) + \"</td></tr>\"\nif not target_rows:\n    target_rows = \"<tr><td colspan='10'>No inferred candidates: a user-supplied receptor was used.</td></tr>\"\nselection_body = \"<section><h2>Selection outcome</h2>\" + table([\n    (\"Mode\", selection.get(\"mode\")),\n    (\"Status\", selection.get(\"status\")),\n    (\"Method\", selection.get(\"method\")),\n    (\"Selected target\", selected_receptor.get(\"target_name\")),\n    (\"Selected target ChEMBL ID\", selected_receptor.get(\"target_chembl_id\")),\n    (\"Selected UniProt accession\", selected_receptor.get(\"uniprot_accession\")),\n    (\"Selected organism\", selected_receptor.get(\"organism\")),\n    (\"Selected PDB ID\", selected_receptor.get(\"pdb_id\")),\n    (\"Selected chain(s)\", \", \".join(selected_receptor.get(\"chain_ids\") or [])),\n    (\"Experimental method\", selected_receptor.get(\"experimental_method\")),\n    (\"Resolution (A)\", selected_receptor.get(\"resolution_A\")),\n    (\"Combined selection score\", selected_receptor.get(\"selection_score\")),\n]) + \"</section>\"\nselection_body += \"<section><h2>Ranked target findings</h2><table><tr><th>Rank</th><th>Target</th><th>ChEMBL</th><th>UniProt</th><th>Max similarity %</th><th>Evidence records</th><th>Max pChEMBL</th><th>Best PDB</th><th>Resolution A</th><th>Evidence score</th></tr>\" + target_rows + \"</table></section>\"\nselection_body += \"<section><h2>Why this receptor was used</h2><ol>\" + \"\".join(\"<li>\" + esc(item) + \"</li>\" for item in selection.get(\"rationale\", [])) + \"</ol><h3>How it entered docking</h3><p>The selected PDB ID and UniProt/SIFTS-mapped chain were passed into PDBFixer and official Meeko receptor preparation. When no grid centre was supplied, an eligible co-crystallized component was ranked by RDKit fingerprint similarity to the query ligand and its coordinate centroid was used as the Vina box centre.</p></section>\"\nselection_body += \"<section><h2>Preparation compatibility preflight</h2>\" + json_pre(selection.get(\"preparation_preflight\", [])) + \"</section><section><h2>Evidence query</h2>\" + json_pre(selection.get(\"query\", {})) + \"<h3>Similar ChEMBL molecules</h3>\" + json_pre(selection.get(\"candidate_molecules\", [])) + \"<h3>Data sources</h3>\" + json_pre(selection.get(\"data_sources\", {})) + \"</section>\"\nselection_body += \"<section><h2>Mandatory limitations</h2><div class='warn'><ul>\" + \"\".join(\"<li>\" + esc(item) + \"</li>\" for item in selection.get(\"limitations\", [])) + \"</ul></div></section>\"\n\ncfg = r[\"docking_configuration\"]\nposes = r[\"docking_results\"][\"poses\"]\npose_rows = \"\".join(\"<tr><td>\" + esc(p[\"rank\"]) + \"</td><td>\" + esc(p[\"affinity_kcal_mol\"]) + \"</td><td>\" + esc(p[\"rmsd_lb_A\"]) + \"</td><td>\" + esc(p[\"rmsd_ub_A\"]) + \"</td></tr>\" for p in poses)\ndock_body = \"<section><h2>Configuration</h2>\" + table([\n    (\"Vina version\", cfg[\"vina_version\"]),\n    (\"Grid center (A)\", cfg[\"grid_center_A\"]),\n    (\"Grid size (A)\", cfg[\"grid_size_A\"]),\n    (\"Auto-centered\", cfg[\"grid_auto_centered\"]),\n    (\"Grid center source\", cfg.get(\"grid_center_source\")),\n    (\"Binding-site reference\", cfg.get(\"binding_site_reference\")),\n    (\"Exhaustiveness\", cfg[\"exhaustiveness\"]),\n    (\"Requested modes\", cfg[\"num_modes\"]),\n    (\"Energy range (kcal/mol)\", cfg[\"energy_range_kcal_mol\"]),\n    (\"CPU\", cfg[\"cpu\"]),\n    (\"Replica seeds\", cfg[\"replica_seeds\"]),\n    (\"Timeout per replica (s)\", cfg[\"timeout_seconds\"]),\n]) + \"</section><section><h2>Ranked poses: selected replica</h2><table><tr><th>Rank</th><th>Vina score (kcal/mol)</th><th>RMSD lower (A)</th><th>RMSD upper (A)</th></tr>\" + pose_rows + \"</table><p class='warn'>\" + esc(r[\"docking_results\"][\"score_semantics\"]) + \"</p></section><section><h2>Replica consistency</h2>\" + table([\n    (\"Top scores\", r[\"docking_results\"][\"replica_top_scores_kcal_mol\"]),\n    (\"Mean\", r[\"docking_results\"][\"replica_top_score_mean\"]),\n    (\"Std dev\", r[\"docking_results\"][\"replica_top_score_stddev\"]),\n    (\"Range\", r[\"docking_results\"][\"replica_top_score_range\"]),\n]) + \"<p>\" + esc(r[\"docking_results\"][\"convergence_note\"]) + \"</p></section>\"\n\ncontacts = r[\"distance_contacts\"]\ncontact_rows = \"\".join(\"<tr><td>\" + esc(item[\"residue\"]) + \"</td><td>\" + esc(item[\"minimum_distance_A\"]) + \"</td><td>\" + esc(item[\"contact_count\"]) + \"</td><td>\" + esc(item[\"contacts\"][0][\"category\"]) + \"</td></tr>\" for item in contacts[\"residues\"])\ncontact_body = \"<section><h2>Transparent geometric screen</h2>\" + table([\n    (\"Status\", contacts[\"status\"]),\n    (\"Method\", contacts[\"method\"]),\n    (\"Cutoff (A)\", contacts[\"cutoff_A\"]),\n    (\"Contact residues\", contacts[\"contact_residue_count\"]),\n]) + \"</section><section><table><tr><th>Residue</th><th>Minimum distance (A)</th><th>Contacts</th><th>Closest category</th></tr>\" + contact_rows + \"</table></section><section><h2>Limitations</h2><ul>\" + \"\".join(\"<li>\" + esc(item) + \"</li>\" for item in contacts[\"limitations\"]) + \"</ul></section>\"\n\nqc_body = \"<section><h2>Recorded software</h2>\" + table(list(rec[\"versions\"].items()) + [(\"vina\", cfg[\"vina_version\"])]) + \"</section><section><h2>Reproducibility parameters</h2>\" + json_pre(cfg) + \"</section><section><h2>QC flags</h2>\" + json_pre(flags) + \"</section><section><h2>Interpretation rules</h2><ul><li>Review the grid in 3D; receptor-centroid auto-placement is only a smoke-test default.</li><li>Review removed heterogens, metals and waters against the biological question.</li><li>Inspect protonation, tautomers, stereochemistry, missing residues and close contacts.</li><li>Use independent replicas/ensembles and experimental evidence for decisions.</li></ul></section>\"\n\nmanifest = r[\"md_handoff\"][\"manifest\"]\nmd_body = \"<section><h2>Status</h2><div class='bad'>STRUCTURAL HANDOFF ONLY — NOT TOPOLOGY-READY</div>\" + table([\n    (\"Chemistry QC passed\", r[\"md_handoff\"][\"chemistry_qc_passed\"]),\n    (\"Chemistry authority\", manifest[\"chemistry_authority\"]),\n    (\"Coordinate complex\", manifest[\"coordinate_complex\"]),\n    (\"Atom mapping\", manifest[\"atom_mapping\"]),\n    (\"Input heavy atoms\", manifest[\"input_atom_counts\"][\"heavy_atoms\"]),\n    (\"Exported heavy atoms\", manifest[\"exported_atom_counts\"][\"heavy_atoms\"]),\n    (\"Complex atoms\", manifest[\"complex_atom_counts\"][\"total\"]),\n]) + \"</section><section><h2>Required before real MD</h2><ol><li>Inspect pose and receptor chemistry.</li><li>Select protein/water/ion and ligand force fields.</li><li>Generate and validate ligand topology/charges.</li><li>Reconcile atom names using atom_mapping.json.</li><li>Define cofactors, metals, waters, termini and disulfides.</li><li>Build topology, periodic box, solvent and ions.</li><li>Minimize, equilibrate NVT/NPT, then run replicated production MD.</li><li>Analyze RMSD/RMSF, contacts, convergence and uncertainty.</li></ol></section>\"\n\nraw_body = \"<section><h2>Machine-readable report</h2>\" + json_pre(r) + \"</section>\"\n\nwith open(os.path.join(out_dir, \"prepared_receptor.pdb\")) as fh:\n    receptor_text = fh.read()\nwith open(os.path.join(out_dir, \"docked.pdbqt\")) as fh:\n    ligand_text = fh.read()\nvisual_body = \"\"\"<section><h2>Selected pose viewer</h2><div class='warn'>Requires internet access to load the 3Dmol.js viewer. Always inspect the SDF/PDB files in a validated molecular viewer.</div><div id='viewer' style='height:680px;width:100%;position:relative'></div></section>\n<script src='https://3Dmol.org/build/3Dmol-min.js'></script><script>\nconst receptor = \"\"\" + json.dumps(receptor_text) + \"\"\";\nconst ligand = \"\"\" + json.dumps(ligand_text) + \"\"\";\nconst viewer = $3Dmol.createViewer('viewer',{backgroundColor:'white'});\nviewer.addModel(receptor,'pdb'); viewer.setStyle({model:0},{cartoon:{color:'spectrum'}});\nviewer.addModel(ligand,'pdbqt'); viewer.setStyle({model:1},{stick:{colorscheme:'greenCarbon'}});\nviewer.zoomTo(); viewer.render();\n</script>\"\"\"\n\noverlay_profile = {\n    \"pdb_id\": rec[\"source\"][\"pdb_id\"],\n    \"source_sha256\": rec[\"source\"][\"sha256\"],\n    \"selected_chains\": rec[\"selected_chains\"],\n    \"heterogen_policy\": rec[\"heterogen_policy\"],\n    \"ph\": rec[\"ph\"],\n}\noverlay_profile_text = json.dumps(overlay_profile, sort_keys=True, separators=(\",\", \":\"))\noverlay_hash = subprocess.run([\"sha256sum\"], input=overlay_profile_text, text=True, capture_output=True, check=True).stdout.split()[0][:16]\nchain_label = \"-\".join(rec[\"selected_chains\"]) or \"all\"\noverlay_group_id = rec[\"source\"][\"pdb_id\"] + \"_\" + chain_label + \"_\" + overlay_hash\noverlay_root = os.path.join(\"/md_project/data/receptor_overlays\", overlay_group_id)\npose_root = os.path.join(overlay_root, \"poses\")\nos.makedirs(pose_root, exist_ok=True)\nlock_path = os.path.join(overlay_root, \".registry.lock\")\nregistry_path = os.path.join(overlay_root, \"overlay_manifest.json\")\nreference_path = os.path.join(overlay_root, \"receptor_reference.pdb\")\ncurrent_pose_source = os.path.join(out_dir, \"best_pose_ligand.sdf\")\ncurrent_pose_name = d[\"run_id\"] + \".sdf\"\ncurrent_pose_path = os.path.join(pose_root, current_pose_name)\nwith open(lock_path, \"a+\") as lock_fh:\n    lock_dir = lock_path + \".d\"\n    lock_acquired = False\n    for _ in range(300):\n        try:\n            os.mkdir(lock_dir)\n            lock_acquired = True\n            break\n        except FileExistsError:\n            try:\n                if time.time() - os.path.getmtime(lock_dir) > 600:\n                    shutil.rmtree(lock_dir, ignore_errors=True)\n                    continue\n            except OSError:\n                pass\n            time.sleep(0.1)\n    if not lock_acquired:\n        raise RuntimeError(\"Timed out acquiring receptor-overlay registry lock\")\n    try:\n        try:\n            with open(registry_path) as fh:\n                overlay_registry = json.load(fh)\n        except (OSError, ValueError):\n            overlay_registry = {\"schema_version\": \"1.0\", \"group_id\": overlay_group_id, \"receptor_profile\": overlay_profile, \"entries\": []}\n        if not os.path.exists(reference_path):\n            shutil.copyfile(os.path.join(out_dir, \"prepared_receptor.pdb\"), reference_path)\n        shutil.copyfile(current_pose_source, current_pose_path)\n        entries = [entry for entry in overlay_registry.get(\"entries\", []) if entry.get(\"run_id\") != d[\"run_id\"] and os.path.exists(os.path.join(pose_root, entry.get(\"pose_file\", \"\")))]\n        selected_target = (r.get(\"receptor_selection\") or {}).get(\"selected\") or {}\n        entries.append({\n            \"run_id\": d[\"run_id\"],\n            \"run_name\": d[\"run_name\"],\n            \"ligand_name\": d[\"ligand_name\"],\n            \"canonical_smiles\": r[\"ligand\"][\"canonical_isomeric_smiles\"],\n            \"inchi_key\": r[\"ligand\"][\"inchi_key\"],\n            \"top_vina_score_kcal_mol\": r[\"docking_results\"][\"top_affinity_kcal_mol\"],\n            \"grid_center_A\": r[\"docking_configuration\"][\"grid_center_A\"],\n            \"grid_size_A\": r[\"docking_configuration\"][\"grid_size_A\"],\n            \"grid_center_source\": r[\"docking_configuration\"].get(\"grid_center_source\"),\n            \"target_name\": selected_target.get(\"target_name\"),\n            \"target_chembl_id\": selected_target.get(\"target_chembl_id\"),\n            \"pose_file\": current_pose_name,\n        })\n        entries.sort(key=lambda entry: (entry.get(\"ligand_name\") or \"\", entry.get(\"run_id\") or \"\"))\n        overlay_registry[\"entries\"] = entries\n        overlay_registry[\"ligand_count\"] = len(entries)\n        overlay_registry[\"coordinate_policy\"] = \"All poses share the exact prepared receptor profile identified by source SHA-256, chains, heterogen policy and pH; no structural transform is required.\"\n        temp_registry = registry_path + \".tmp\"\n        with open(temp_registry, \"w\") as fh:\n            json.dump(overlay_registry, fh, indent=2)\n        os.replace(temp_registry, registry_path)\n    finally:\n        shutil.rmtree(lock_dir, ignore_errors=True)\n\nwith open(reference_path) as fh:\n    overlay_receptor_text = fh.read()\noverlay_records = []\ncombined_sdf_parts = []\npublic_entries = []\npalette = [\"#e11d48\", \"#2563eb\", \"#16a34a\", \"#9333ea\", \"#ea580c\", \"#0891b2\", \"#ca8a04\", \"#db2777\", \"#4f46e5\", \"#059669\", \"#7c3aed\", \"#dc2626\"]\nfor index, entry in enumerate(overlay_registry[\"entries\"]):\n    pose_path = os.path.join(pose_root, entry[\"pose_file\"])\n    try:\n        with open(pose_path) as fh:\n            sdf_text = fh.read()\n    except OSError:\n        continue\n    if \"$$$$\" not in sdf_text:\n        sdf_text = sdf_text.rstrip() + \"\\n$$$$\\n\"\n    combined_sdf_parts.append(sdf_text.rstrip() + \"\\n\")\n    public_entry = dict(entry)\n    public_entry[\"color\"] = palette[index % len(palette)]\n    public_entries.append(public_entry)\n    overlay_records.append({\"metadata\": public_entry, \"sdf\": sdf_text})\ncombined_sdf = \"\\n\".join(combined_sdf_parts)\noverlay_public = {\n    \"schema_version\": overlay_registry[\"schema_version\"],\n    \"group_id\": overlay_group_id,\n    \"receptor_profile\": overlay_profile,\n    \"ligand_count\": len(public_entries),\n    \"coordinate_policy\": overlay_registry[\"coordinate_policy\"],\n    \"entries\": public_entries,\n}\ncontrol_rows = \"\".join(\n    \"<tr><td><input type='checkbox' checked onchange='togglePose(\" + str(index) + \",this.checked)'></td><td><span style='display:inline-block;width:13px;height:13px;border-radius:50%;background:\" + esc(entry[\"color\"]) + \"'></span></td><td>\" + esc(entry.get(\"ligand_name\")) + \"</td><td>\" + esc(entry.get(\"run_id\")) + \"</td><td>\" + esc(entry.get(\"top_vina_score_kcal_mol\")) + \"</td><td>\" + esc(entry.get(\"grid_center_source\")) + \"</td></tr>\"\n    for index, entry in enumerate(public_entries)\n)\nvisual_body = \"<section><h2>Superimposed best poses</h2><div class='warn'>This is a receptor-profile-matched overlay of predicted docking poses, not proof of binding or covalent attachment. It requires internet access to load 3Dmol.js.</div>\" + table([\n    (\"Overlay group\", overlay_group_id),\n    (\"Receptor\", overlay_profile[\"pdb_id\"]),\n    (\"Chains\", \", \".join(overlay_profile[\"selected_chains\"])),\n    (\"Ligands in this snapshot\", len(public_entries)),\n    (\"Coordinate policy\", overlay_registry[\"coordinate_policy\"]),\n]) + \"<div style='margin:12px 0'><button onclick='setAll(true)'>Show all</button> <button onclick='setAll(false)'>Hide all</button> <button onclick='viewer.zoomTo();viewer.render()'>Fit view</button></div><div id='viewer' style='height:720px;width:100%;position:relative'></div></section>\"\nvisual_body += \"<section><h2>Ligand controls and scores</h2><table><tr><th>Show</th><th>Color</th><th>Ligand</th><th>Run ID</th><th>Top Vina score</th><th>Grid source</th></tr>\" + control_rows + \"</table><p class='muted'>The overlay is a snapshot generated during this run. Later runs with the same receptor profile will appear in later snapshots.</p></section>\"\nvisual_body += \"<script src='https://3Dmol.org/build/3Dmol-min.js'></script><script>const receptor=\" + json.dumps(overlay_receptor_text) + \";const poseData=\" + json.dumps(overlay_records) + \";const viewer=$3Dmol.createViewer('viewer',{backgroundColor:'white'});viewer.addModel(receptor,'pdb');viewer.setStyle({model:0},{cartoon:{color:'spectrum'}});const ligandModels=[];const ligandStyles=[];poseData.forEach((pose,i)=>{const model=viewer.addModel(pose.sdf,'sdf');const style={stick:{color:pose.metadata.color,radius:0.22},sphere:{color:pose.metadata.color,scale:0.22}};model.setStyle({},style);ligandModels.push(model);ligandStyles.push(style);});function togglePose(i,on){ligandModels[i].setStyle({},on?ligandStyles[i]:{});viewer.render();}function setAll(on){document.querySelectorAll(\\\"input[type='checkbox']\\\").forEach((box,i)=>{box.checked=on;togglePose(i,on);});}viewer.zoomTo();viewer.render();</script>\"\n\ndocuments = {\n    \"index.html\": page(\"Docking run report\", index_body),\n    \"01_input_provenance.html\": page(\"Input and provenance\", input_body),\n    \"02_ligand_preparation.html\": page(\"Ligand preparation\", lig_body),\n    \"03_receptor_preparation.html\": page(\"Receptor preparation\", rec_body),\n    \"03a_receptor_selection.html\": page(\"Automatic receptor-selection findings\", selection_body),\n    \"04_docking_results.html\": page(\"Docking configuration and ranked poses\", dock_body),\n    \"05_distance_contacts.html\": page(\"Distance-contact screen\", contact_body),\n    \"06_methods_qc.html\": page(\"Methods, reproducibility and QC\", qc_body),\n    \"07_md_handoff_readiness.html\": page(\"MD handoff readiness\", md_body),\n    \"08_raw_data.html\": page(\"Raw machine-readable data\", raw_body),\n    \"09_visualization.html\": page(\"3D visualization\", visual_body),\n}\ndocuments[\"receptor_overlay_reference.pdb\"] = overlay_receptor_text\ndocuments[\"all_best_poses.sdf\"] = combined_sdf\ndocuments[\"ligand_overlay.json\"] = json.dumps(overlay_public, indent=2)\nrun_summary = {\n    \"run_id\": r[\"run\"][\"run_id\"],\n    \"run_name\": d[\"run_name\"],\n    \"status\": \"DOCKING_COMPLETED_STRUCTURAL_MD_HANDOFF_CREATED\",\n    \"top_vina_score_kcal_mol\": top,\n    \"selected_replica\": r[\"docking_results\"][\"selected_replica\"],\n    \"qc_flags\": flags,\n    \"md_status\": r[\"md_handoff\"][\"status\"],\n    \"receptor_selection\": {\"mode\": selection.get(\"mode\"), \"status\": selection.get(\"status\"), \"selected\": selected_receptor},\n    \"overlay_group\": {\"group_id\": overlay_group_id, \"ligand_count\": len(public_entries), \"artifacts\": [\"09_visualization.html\", \"receptor_overlay_reference.pdb\", \"all_best_poses.sdf\", \"ligand_overlay.json\"]},\n    \"report_files\": sorted([name for name in documents] + [\"run_summary.json\"]),\n}\ndocuments[\"run_summary.json\"] = json.dumps(run_summary, indent=2)\n\nreports_b64 = {name: base64.b64encode(content.encode(\"utf-8\")).decode(\"ascii\") for name, content in documents.items()}\nout = dict(d)\nout[\"reports_b64\"] = reports_b64\nout[\"report_summary\"] = run_summary\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-scientific-reports",
+      "name": "Build Scientific Report Package",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1952,
+        16
+      ],
+      "notes": "Produces ten linked scientific HTML reports plus run_summary.json with scores, provenance, QC, limitations and MD readiness."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import base64\nimport json\nimport os\nimport subprocess\nimport sys\nfrom rdkit import Chem\n\nd = _items[0][\"json\"]\nout_dir = d[\"output_dir\"]\ndocked_pdbqt = os.path.join(out_dir, \"docked.pdbqt\")\ndocked_sdf = os.path.join(out_dir, \"docked_poses.sdf\")\nexport_cmd = [sys.executable, \"-m\", \"meeko.cli.mk_export\", docked_pdbqt, \"--write_sdf\", docked_sdf]\ntry:\n    proc = subprocess.run(export_cmd, capture_output=True, text=True, timeout=180)\nexcept subprocess.TimeoutExpired:\n    raise ValueError(\"Official Meeko pose export exceeded 180 seconds\")\nexport_log = (proc.stdout or \"\") + \"\\n\" + (proc.stderr or \"\")\nwith open(os.path.join(out_dir, \"meeko_export.log\"), \"w\") as fh:\n    fh.write(export_log)\nif proc.returncode != 0 or not os.path.exists(docked_sdf):\n    raise ValueError(\"Official Meeko mk_export failed: \" + export_log[-1600:])\n\nposes = [mol for mol in Chem.SDMolSupplier(docked_sdf, removeHs=False) if mol is not None]\nif not poses:\n    raise ValueError(\"Meeko exported no chemically reconstructed ligand poses\")\nbest = poses[0]\ndocked_heavy_atoms = best.GetNumHeavyAtoms()\nif docked_heavy_atoms != int(d[\"num_heavy_atoms\"]):\n    raise ValueError(\"Chemistry-preserving export QC failed: input heavy atoms \" + str(d[\"num_heavy_atoms\"]) +\n                     \" != docked heavy atoms \" + str(docked_heavy_atoms))\n\natom_mapping = []\nelement_counts = {}\nfor index, atom in enumerate(best.GetAtoms()):\n    symbol = atom.GetSymbol()\n    element_counts[symbol] = element_counts.get(symbol, 0) + 1\n    atom_name = (symbol + str(element_counts[symbol]))[:4]\n    info = Chem.AtomPDBResidueInfo()\n    info.SetName(atom_name.rjust(4))\n    info.SetResidueName(\"LIG\")\n    info.SetResidueNumber(1)\n    info.SetChainId(\"Z\")\n    info.SetIsHeteroAtom(True)\n    atom.SetMonomerInfo(info)\n    atom_mapping.append({\n        \"docked_sdf_index_0_based\": index,\n        \"pdb_atom_name\": atom_name,\n        \"element\": symbol,\n        \"atomic_number\": atom.GetAtomicNum(),\n        \"formal_charge\": atom.GetFormalCharge(),\n    })\n\nbest_sdf = os.path.join(out_dir, \"best_pose_ligand.sdf\")\nwriter = Chem.SDWriter(best_sdf)\nwriter.write(best)\nwriter.close()\nbest_pdb = os.path.join(out_dir, \"best_pose_ligand.pdb\")\nChem.MolToPDBFile(best, best_pdb)\n\nmapping_record = {\n    \"schema\": \"docked SDF atom index to unique ligand PDB atom name\",\n    \"atom_mapping\": atom_mapping,\n    \"canonical_isomeric_smiles\": d[\"canonical_smiles\"],\n    \"inchi_key\": d[\"inchi_key\"],\n    \"note\": \"The SDF is the chemistry-authoritative ligand structure. PDB atom names are a stable coordinate handoff for topology generation.\",\n}\nmapping_path = os.path.join(out_dir, \"atom_mapping.json\")\nwith open(mapping_path, \"w\") as fh:\n    json.dump(mapping_record, fh, indent=2)\n\nprepared_receptor = os.path.join(out_dir, \"prepared_receptor.pdb\")\ncomplex_path = os.path.join(out_dir, \"complex_best_pose.pdb\")\nserial = 1\nreceptor_atom_count = 0\nligand_atom_count = 0\nwith open(complex_path, \"w\") as out_fh:\n    with open(prepared_receptor) as rec_fh:\n        for line in rec_fh:\n            if line.startswith((\"ATOM\", \"HETATM\")):\n                out_fh.write(line[:6] + str(serial).rjust(5) + line[11:].rstrip(\"\\n\") + \"\\n\")\n                serial += 1\n                receptor_atom_count += 1\n    out_fh.write(\"TER\\n\")\n    with open(best_pdb) as lig_fh:\n        for line in lig_fh:\n            if line.startswith((\"ATOM\", \"HETATM\")):\n                out_fh.write(\"HETATM\" + str(serial).rjust(5) + line[11:].rstrip(\"\\n\") + \"\\n\")\n                serial += 1\n                ligand_atom_count += 1\n    out_fh.write(\"END\\n\")\n\nif ligand_atom_count != best.GetNumAtoms():\n    raise ValueError(\"Complex assembly lost ligand atoms\")\nif serial - 1 != receptor_atom_count + ligand_atom_count:\n    raise ValueError(\"Complex assembly serial/count invariant failed\")\n\nreadme = \"\"\"# MD structural handoff\n\nStatus: not topology-ready.\n\nThis folder contains a chemistry-preserving, coordinate-level handoff from rigid-receptor AutoDock Vina docking. Use docked_poses.sdf or best_pose_ligand.sdf as the ligand chemistry authority, prepared_receptor.pdb as the prepared protein coordinates, and complex_best_pose.pdb only as a combined starting coordinate model.\n\nBefore any real GROMACS MD, independently inspect the binding pose, choose and document protein/ligand force fields, generate ligand parameters and charges, reconcile protonation and atom names with atom_mapping.json, define termini/disulfides/cofactors/metals/waters, build the topology, solvate, add ions, minimize, equilibrate (NVT/NPT), and run replicated production MD with convergence analysis.\n\nDocking scores are ranking signals. They are not experimental affinities and not MD free energies.\n\"\"\"\nreadme_path = os.path.join(out_dir, \"README_MD_HANDOFF.md\")\nwith open(readme_path, \"w\") as fh:\n    fh.write(readme)\n\nprovenance = {\n    \"run_id\": d[\"run_id\"],\n    \"source_drive\": {\n        \"file_id\": d.get(\"source_file_id\"),\n        \"file_name\": d.get(\"source_file_name\"),\n        \"mime_type\": d.get(\"source_mime_type\"),\n        \"modified_time\": d.get(\"source_modified_time\"),\n        \"md5\": d.get(\"source_md5\"),\n    },\n    \"ligand\": {\n        \"input_smiles\": d[\"smiles\"],\n        \"canonical_isomeric_smiles\": d[\"canonical_smiles\"],\n        \"inchi_key\": d[\"inchi_key\"],\n        \"conformer_generation\": d[\"conformer_generation\"],\n        \"preparation\": d[\"ligand_prep\"],\n    },\n    \"receptor\": d[\"protein_stats\"],\n    \"receptor_selection\": d.get(\"receptor_selection\", {}),\n    \"docking\": {\n        \"vina_version\": d[\"vina_version\"],\n        \"grid_center_A\": d[\"grid_center\"],\n        \"grid_size_A\": d[\"grid_size\"],\n        \"grid_auto_centered\": d[\"grid_auto_centered\"],\n        \"grid_center_source\": d.get(\"grid_center_source\"),\n        \"exhaustiveness\": d[\"exhaustiveness\"],\n        \"num_modes\": d[\"num_modes\"],\n        \"energy_range_kcal_mol\": d[\"energy_range\"],\n        \"cpu\": d[\"cpu\"],\n        \"replica_seeds\": [item[\"seed\"] for item in d[\"replica_runs\"]],\n        \"selected_replica\": d[\"selected_replica\"],\n        \"results\": d[\"docking_results\"],\n    },\n    \"contacts\": d[\"interactions_summary\"],\n    \"qc_flags\": d[\"qc_flags\"],\n    \"md_status\": \"STRUCTURAL_HANDOFF_ONLY_NOT_TOPOLOGY_READY\",\n}\nprovenance_path = os.path.join(out_dir, \"provenance.json\")\nwith open(provenance_path, \"w\") as fh:\n    json.dump(provenance, fh, indent=2)\n\nfiles = {\n    \"receptor_source.cif\": d[\"receptor_source_path\"],\n    \"prepared_receptor.pdb\": prepared_receptor,\n    \"receptor.pdbqt\": os.path.join(out_dir, \"receptor.pdbqt\"),\n    \"receptor.json\": os.path.join(out_dir, \"receptor.json\"),\n    \"receptor_prep.log\": os.path.join(out_dir, \"receptor_prep.log\"),\n    \"ligand_input.sdf\": os.path.join(out_dir, \"ligand_input.sdf\"),\n    \"ligand.pdbqt\": os.path.join(out_dir, \"ligand.pdbqt\"),\n    \"ligand_2d.svg\": os.path.join(out_dir, \"ligand_2d.svg\"),\n    \"docked.pdbqt\": docked_pdbqt,\n    \"docked_poses.sdf\": docked_sdf,\n    \"best_pose_ligand.sdf\": best_sdf,\n    \"best_pose_ligand.pdb\": best_pdb,\n    \"complex_best_pose.pdb\": complex_path,\n    \"atom_mapping.json\": mapping_path,\n    \"docking.log\": os.path.join(out_dir, \"docking.log\"),\n    \"docking_results.json\": os.path.join(out_dir, \"docking_results.json\"),\n    \"interactions.json\": os.path.join(out_dir, \"interactions.json\"),\n    \"protein_stats.json\": os.path.join(out_dir, \"protein_stats.json\"),\n    \"meeko_export.log\": os.path.join(out_dir, \"meeko_export.log\"),\n    \"provenance.json\": provenance_path,\n    \"README_MD_HANDOFF.md\": readme_path,\n}\nfor item in d[\"replica_runs\"]:\n    files[\"docked_replica_\" + str(item[\"replica\"]) + \".pdbqt\"] = item[\"pose_path\"]\n    files[\"vina_replica_\" + str(item[\"replica\"]) + \".log\"] = item[\"log_path\"]\n\ndef sha256(path):\n    result = subprocess.run([\"sha256sum\", path], capture_output=True, text=True, timeout=30)\n    if result.returncode != 0:\n        raise ValueError(\"sha256sum failed for \" + path)\n    return result.stdout.split()[0]\n\nmanifest = {\n    \"schema_version\": \"2.0\",\n    \"run_id\": d[\"run_id\"],\n    \"status\": \"not topology-ready\",\n    \"chemistry_authority\": \"best_pose_ligand.sdf\",\n    \"coordinate_complex\": \"complex_best_pose.pdb\",\n    \"atom_mapping\": \"atom_mapping.json\",\n    \"input_atom_counts\": {\"all_atoms\": d[\"num_atoms\"], \"heavy_atoms\": d[\"num_heavy_atoms\"]},\n    \"exported_atom_counts\": {\"all_atoms\": best.GetNumAtoms(), \"heavy_atoms\": docked_heavy_atoms},\n    \"complex_atom_counts\": {\"receptor\": receptor_atom_count, \"ligand\": ligand_atom_count,\n                            \"total\": receptor_atom_count + ligand_atom_count},\n    \"files\": {name: {\"sha256\": sha256(path), \"bytes\": os.path.getsize(path)} for name, path in files.items()},\n}\nmanifest_path = os.path.join(out_dir, \"manifest.json\")\nwith open(manifest_path, \"w\") as fh:\n    json.dump(manifest, fh, indent=2)\nfiles[\"manifest.json\"] = manifest_path\n\nmd_files_b64 = {}\nfor name, path in files.items():\n    with open(path, \"rb\") as fh:\n        md_files_b64[name] = base64.b64encode(fh.read()).decode(\"ascii\")\n\nout = dict(d)\nout[\"md_handoff\"] = {\n    \"status\": \"STRUCTURAL_HANDOFF_ONLY_NOT_TOPOLOGY_READY\",\n    \"manifest\": manifest,\n    \"file_count\": len(md_files_b64),\n    \"chemistry_qc_passed\": True,\n}\nout[\"md_files_b64\"] = md_files_b64\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-md-bundle",
+      "name": "Build MD Handoff Bundle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1504,
+        16
+      ],
+      "notes": "Uses official Meeko mk_export to restore ligand bond orders/hydrogens, verifies heavy-atom identity, creates stable atom mapping and checksummed structural handoff. It is explicitly not topology-ready."
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "MD_Handoff",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $('Create Run Folder (Drive)').first().json.id }}",
+          "mode": "id",
+          "cachedResultName": "Current run folder"
+        },
+        "options": {}
+      },
+      "id": "pydock-md-folder",
+      "name": "Create MD Handoff Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2400,
+        16
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Creates the MD_Handoff subfolder inside this docking run's report folder."
+    },
+    {
+      "parameters": {
+        "jsCode": "const bundle = $('Build MD Handoff Bundle').first().json;\nconst folder = $('Create MD Handoff Folder').first().json;\nif (!folder.id) throw new Error('Google Drive MD_Handoff folder was not created');\nif (!bundle.md_files_b64 || !Object.keys(bundle.md_files_b64).length) throw new Error('MD handoff bundle is empty');\nconst mime = (name) => name.endsWith('.json') ? 'application/json'\n  : name.endsWith('.html') ? 'text/html'\n  : name.endsWith('.svg') ? 'image/svg+xml'\n  : name.endsWith('.md') || name.endsWith('.log') || name.endsWith('.pdb') || name.endsWith('.pdbqt') || name.endsWith('.cif') ? 'text/plain'\n  : 'application/octet-stream';\nreturn Object.entries(bundle.md_files_b64).map(([fileName, fileB64]) => ({\n  json: { fileName, folderId: folder.id, fileB64, mimeType: mime(fileName) }\n}));"
+      },
+      "id": "pydock-md-prepfiles",
+      "name": "Prepare MD Handoff Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2624,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "fileB64",
+        "options": {
+          "fileName": "={{ $json.fileName }}",
+          "mimeType": "={{ $json.mimeType }}"
+        }
+      },
+      "id": "pydock-md-tobinary",
+      "name": "MD Files To Binary",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2848,
+        16
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $binary.data.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "={{ $('Create MD Handoff Folder').first().json.id }}",
+          "mode": "id",
+          "cachedResultName": "Current MD_Handoff folder"
+        },
+        "options": {}
+      },
+      "id": "pydock-md-upload",
+      "name": "Upload MD Handoff Files",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3072,
+        16
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "notes": "Uploads the MD structural handoff and docking provenance files."
+    },
+    {
+      "parameters": {
+        "content": "## Google Drive input — receptor selection enabled\n\nUpload one `.txt`, `.smi`, `.smiles`, or `.json` file into **SMILES Input**.\n\n**Automatic receptor selection (default when pdb_id is omitted):**\n```json\n{\n  \"ligand_name\": \"candidate_01\",\n  \"smiles\": \"YOUR_SMILES\",\n  \"receptor_selection_mode\": \"auto\",\n  \"target_organism\": \"Homo sapiens\",\n  \"target_similarity_threshold\": 70,\n  \"target_candidate_limit\": 5,\n  \"heterogen_policy\": \"remove_all\",\n  \"size_x\": 20,\n  \"size_y\": 20,\n  \"size_z\": 20,\n  \"ph\": 7.4,\n  \"exhaustiveness\": 8,\n  \"num_modes\": 9,\n  \"seed\": 20260824,\n  \"cpu\": 1,\n  \"replicas\": 1,\n  \"timeout_seconds\": 900,\n  \"cutoff\": 4.5\n}\n```\n\nThe workflow ranks organism-matched SINGLE PROTEIN targets from ChEMBL ligand-similarity/activity evidence, selects a ligand-containing experimental RCSB structure, maps the target chain through UniProt/SIFTS, and records all findings. No approval pause is used.\n\n**Force a receptor:** set `\"receptor_selection_mode\":\"provided\"`, `\"pdb_id\":\"1AKI\"`, and optional `\"chain_ids\":[\"A\"]`. A supplied PDB remains a user hypothesis.\n\nIf no centre is supplied, an eligible co-crystallized ligand is ranked by similarity and used for the box centre; receptor-centroid placement is only a flagged fallback. One ligand per input file.",
+        "height": 900,
+        "width": 908,
+        "color": 5
+      },
+      "id": "note-pydock-input",
+      "name": "Sticky Note — Accepted Inputs",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1536,
+        -1008
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Processing and scientific controls\n\n1. Capture the Drive file and immutable source metadata.\n2. Normalize SMILES and create an isolated `dock_*` workspace.\n3. In **auto** mode, query ChEMBL similarity/activity evidence, keep organism-matched SINGLE PROTEIN targets, query RCSB experimental structures, and map the selected UniProt target to author chain(s).\n4. Record ranked targets, evidence counts, pChEMBL values, selected PDB/resolution, rationale, data sources and limitations.\n5. RDKit ETKDG creates a seeded conformer; official Meeko prepares ligand PDBQT.\n6. PDBFixer and official Meeko prepare the selected receptor.\n7. If the user did not provide a grid centre, eligible co-crystallized components are compared to the query ligand and the best-matching component centroid is used. Receptor centroid is a flagged fallback.\n8. AutoDock Vina runs with recorded box, seeds and limits.\n9. Meeko reconstructs chemistry, contacts are screened, MD structural handoff is checksummed, and the workspace is cleaned.\n10. Target prediction and docking scores are hypotheses—not experimental target confirmation, affinity, efficacy or MD free energy.",
+        "height": 700,
+        "width": 1140,
+        "color": 6
+      },
+      "id": "note-pydock-process",
+      "name": "Sticky Note — Processing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -576,
+        -1008
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Google Drive outputs\n\nEach run creates a unique folder under **Docking Reports**.\n\n**Reports now include:**\n- outcome, provenance and ligand preparation\n- dedicated receptor-selection findings: ranked ChEMBL targets, evidence, selected UniProt/PDB/chain, resolution, rationale, exact downstream use and limitations\n- receptor preparation and co-crystallized pocket reference\n- Vina configuration, ranked poses, contacts, QC and MD readiness\n- raw machine-readable data\n- interactive **superimposed ligand overlay** for every retained best pose sharing the exact receptor profile (source SHA-256, chains, heterogen policy and pH)\n- `all_best_poses.sdf`, `ligand_overlay.json`, and `receptor_overlay_reference.pdb`\n\nThe overlay is cumulative for runs produced after this feature was enabled. It shows predicted poses, not proven or covalent attachment.\n\n**MD_Handoff/** remains structural-only and contains receptor, ligand/poses, complex, logs, mapping, provenance and checksums. It is not topology-, solvent-, ion-, equilibration-, trajectory-, convergence- or free-energy-ready.",
+        "height": 700,
+        "width": 988,
+        "color": 4
+      },
+      "id": "note-pydock-output",
+      "name": "Sticky Note — Reports and MD Handoff",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        608,
+        -1008
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('SMILES Drop (Drive Trigger)').first().json;\nconst extracted = $input.first().json;\nconst text = typeof extracted.data === 'string'\n  ? extracted.data\n  : (typeof extracted.text === 'string' ? extracted.text : String(extracted.data ?? ''));\nif (!text.trim()) throw new Error('The Drive file is empty or is not extractable as plain text');\nreturn [{ json: {\n  data: text,\n  source_file_id: source.id,\n  source_file_name: source.name || source.fileName || 'drive-input.txt',\n  source_mime_type: source.mimeType || null,\n  source_modified_time: source.modifiedTime || null,\n  source_md5: source.md5Checksum || null,\n} }];"
+      },
+      "id": "pydock-drive-metadata",
+      "name": "Attach Drive Metadata",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        16
+      ],
+      "notes": "Carries immutable Google Drive source metadata into the scientific provenance record."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import os\nimport shutil\n\nd = _items[0][\"json\"]\nrun_dir = str(d.get(\"run_dir\", \"\"))\nroot = \"/md_project/data/runs\"\ncleaned = False\nif run_dir and os.path.dirname(run_dir) == root and os.path.basename(run_dir).startswith(\"dock_\") and os.path.isdir(run_dir):\n    shutil.rmtree(run_dir)\n    cleaned = True\nout = dict(d)\nout[\"workspace_cleaned\"] = cleaned\nout.pop(\"run_dir\", None)\nout.pop(\"input_dir\", None)\nout.pop(\"output_dir\", None)\nout.pop(\"reports_dir\", None)\nreturn [{\"json\": out}]"
+      },
+      "id": "pydock-cleanup",
+      "name": "Cleanup Run Workspace",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4192,
+        16
+      ],
+      "notes": "Removes only this successful run's isolated temporary workspace after all Drive uploads finish."
+    },
+    {
+      "parameters": {
+        "language": "python",
+        "pythonCode": "import json\nimport os\nimport shutil\nimport subprocess\nimport sys\nimport tempfile\nimport time\nimport urllib.parse\nimport urllib.request\nfrom rdkit import Chem\nfrom pdbfixer import PDBFixer\nfrom openmm.app import PDBFile\n\nd = dict(_items[0][\"json\"])\nmode = d.get(\"receptor_selection_mode\", \"auto\")\n\ndef get_json(url, payload=None, attempts=3):\n    headers = {\"Accept\": \"application/json\", \"Content-Type\": \"application/json\", \"User-Agent\": \"n8n-drug-prep-docking/3.0 receptor-selection\"}\n    body = json.dumps(payload).encode(\"utf-8\") if payload is not None else None\n    last_error = None\n    for attempt in range(attempts):\n        try:\n            req = urllib.request.Request(url, data=body, headers=headers)\n            with urllib.request.urlopen(req, timeout=35) as response:\n                return json.load(response)\n        except Exception as exc:\n            last_error = exc\n            if attempt + 1 < attempts:\n                time.sleep(0.6 * (attempt + 1))\n    raise ValueError(\"External evidence query failed for \" + url.split(\"?\")[0] + \": \" + str(last_error))\n\nif mode == \"provided\":\n    d[\"receptor_selection\"] = {\n        \"mode\": \"provided\",\n        \"status\": \"USER_SPECIFIED_RECEPTOR_USED\",\n        \"query\": {\"input_smiles\": d[\"smiles\"], \"target_organism\": d[\"target_organism\"], \"provided_pdb_id\": d[\"pdb_id\"], \"provided_chain_ids\": d[\"chain_ids\"]},\n        \"method\": \"No ligand-to-target inference was performed because the input explicitly selected a receptor.\",\n        \"candidate_molecules\": [],\n        \"candidate_targets\": [],\n        \"selected\": {\"pdb_id\": d[\"pdb_id\"], \"chain_ids\": d[\"chain_ids\"], \"target_name\": None, \"target_chembl_id\": None, \"uniprot_accession\": None, \"organism\": None, \"resolution_A\": None, \"experimental_method\": None, \"selection_score\": None},\n        \"rationale\": [\"The input explicitly supplied pdb_id=\" + d[\"pdb_id\"] + \".\", \"The supplied chain and grid settings were passed to receptor preparation and docking.\"],\n        \"limitations\": [\"A supplied PDB ID is not evidence that the ligand binds this receptor.\", \"The receptor identity, biological assembly, chain, construct and binding site remain the user's scientific responsibility.\"],\n        \"data_sources\": {\"rcsb\": \"https://www.rcsb.org/\", \"chembl\": \"not queried in provided mode\"},\n    }\n    return [{\"json\": d}]\n\nquery_mol = Chem.MolFromSmiles(d[\"smiles\"])\nif query_mol is None:\n    raise ValueError(\"RDKit could not parse the ligand for automatic receptor selection\")\ncanonical = Chem.MolToSmiles(query_mol, isomericSmiles=True)\nthreshold = float(d.get(\"target_similarity_threshold\", 70))\nlimit = int(d.get(\"target_candidate_limit\", 5))\norganism = d.get(\"target_organism\", \"Homo sapiens\")\nsimilarity_url = \"https://www.ebi.ac.uk/chembl/api/data/similarity/\" + urllib.parse.quote(canonical, safe=\"\") + \"/\" + str(int(threshold)) + \".json?limit=12\"\nsimilarity_data = get_json(similarity_url)\nmolecule_hits = []\nseen_molecules = set()\nfor item in similarity_data.get(\"molecules\", []):\n    molecule_id = item.get(\"molecule_chembl_id\")\n    if not molecule_id or molecule_id in seen_molecules:\n        continue\n    try:\n        similarity = float(item.get(\"similarity\") or 0)\n    except (TypeError, ValueError):\n        similarity = 0\n    if similarity < threshold:\n        continue\n    structures = item.get(\"molecule_structures\") or {}\n    molecule_hits.append({\"molecule_chembl_id\": molecule_id, \"similarity_percent\": round(similarity, 3), \"canonical_smiles\": structures.get(\"canonical_smiles\")})\n    seen_molecules.add(molecule_id)\n    if len(molecule_hits) >= 8:\n        break\nif not molecule_hits:\n    raise ValueError(\"Automatic receptor selection found no ChEMBL molecule above the configured similarity threshold\")\n\ndef load_activities(hit):\n    url = \"https://www.ebi.ac.uk/chembl/api/data/activity.json?\" + urllib.parse.urlencode({\"molecule_chembl_id\": hit[\"molecule_chembl_id\"], \"limit\": 300})\n    return {\"hit\": hit, \"activities\": get_json(url).get(\"activities\", [])}\nactivity_batches = [load_activities(hit) for hit in molecule_hits]\n\naggregates = {}\nfor activity_batch in activity_batches:\n    hit = activity_batch[\"hit\"]\n    activities = activity_batch[\"activities\"]\n    for activity in activities:\n        target_id = activity.get(\"target_chembl_id\")\n        target_name = activity.get(\"target_pref_name\")\n        if not target_id or target_name in (None, \"No relevant target\") or activity.get(\"target_organism\") != organism:\n            continue\n        if activity.get(\"assay_type\") not in (\"B\", \"F\") or activity.get(\"data_validity_comment\"):\n            continue\n        record = aggregates.setdefault(target_id, {\"target_chembl_id\": target_id, \"target_name\": target_name, \"organism\": organism, \"evidence_records\": 0, \"similar_molecules\": set(), \"max_similarity_percent\": 0.0, \"pchembl_values\": [], \"assay_types\": set(), \"standard_types\": set(), \"exact_query_evidence_records\": 0})\n        record[\"evidence_records\"] += 1\n        record[\"similar_molecules\"].add(hit[\"molecule_chembl_id\"])\n        record[\"max_similarity_percent\"] = max(record[\"max_similarity_percent\"], hit[\"similarity_percent\"])\n        record[\"assay_types\"].add(str(activity.get(\"assay_type\")))\n        if activity.get(\"standard_type\"):\n            record[\"standard_types\"].add(str(activity.get(\"standard_type\")))\n        try:\n            if activity.get(\"pchembl_value\") is not None:\n                record[\"pchembl_values\"].append(float(activity[\"pchembl_value\"]))\n        except (TypeError, ValueError):\n            pass\n        if hit[\"similarity_percent\"] >= 99.99:\n            record[\"exact_query_evidence_records\"] += 1\n\npreliminary_score = lambda record: (\n    0.42 * (record[\"max_similarity_percent\"] / 100.0)\n    + 0.20 * (min(record[\"evidence_records\"], 20) / 20.0)\n    + 0.13 * (min(len(record[\"similar_molecules\"]), 5) / 5.0)\n    + 0.10 * (min(max((max(record[\"pchembl_values\"]) if record[\"pchembl_values\"] else 0.0) - 3.0, 0.0), 6.0) / 6.0)\n    + 0.15 * (1.0 if record[\"exact_query_evidence_records\"] else 0.0)\n)\n\nranked_raw = sorted(aggregates.values(), key=lambda item: (-preliminary_score(item), item[\"target_chembl_id\"]))[:12]\nif not ranked_raw:\n    raise ValueError(\"Automatic receptor selection found no organism-matched binding or functional target evidence in ChEMBL\")\n\ndef load_target(record):\n    return {\"record\": record, \"detail\": get_json(\"https://www.ebi.ac.uk/chembl/api/data/target/\" + urllib.parse.quote(record[\"target_chembl_id\"]) + \".json\")}\ntarget_candidates = []\nfor target_result in [load_target(record) for record in ranked_raw]:\n    record = target_result[\"record\"]\n    detail = target_result[\"detail\"]\n    if detail.get(\"target_type\") != \"SINGLE PROTEIN\":\n        continue\n    accessions = [component.get(\"accession\") for component in (detail.get(\"target_components\") or []) if component.get(\"accession\")]\n    if not accessions:\n        continue\n    values = record[\"pchembl_values\"]\n    target_candidates.append({\"target_chembl_id\": record[\"target_chembl_id\"], \"target_name\": detail.get(\"pref_name\") or record[\"target_name\"], \"organism\": detail.get(\"organism\") or record[\"organism\"], \"target_type\": detail.get(\"target_type\"), \"uniprot_accession\": accessions[0], \"evidence_records\": record[\"evidence_records\"], \"similar_molecule_count\": len(record[\"similar_molecules\"]), \"max_similarity_percent\": round(record[\"max_similarity_percent\"], 3), \"exact_query_evidence_records\": record[\"exact_query_evidence_records\"], \"max_pchembl\": round(max(values), 3) if values else None, \"assay_types\": sorted(record[\"assay_types\"]), \"standard_types\": sorted(record[\"standard_types\"]), \"evidence_score\": round(preliminary_score(record), 6)})\ntarget_candidates.sort(key=lambda item: (-item[\"evidence_score\"], item[\"target_chembl_id\"]))\ntarget_candidates = target_candidates[:limit]\nif not target_candidates:\n    raise ValueError(\"ChEMBL evidence did not resolve to an organism-matched SINGLE PROTEIN target with a UniProt accession\")\n\ndef search_structures(target):\n    accession = target[\"uniprot_accession\"]\n    query = {\"query\": {\"type\": \"group\", \"logical_operator\": \"and\", \"nodes\": [\n        {\"type\": \"terminal\", \"service\": \"text\", \"parameters\": {\"attribute\": \"rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers.database_accession\", \"operator\": \"exact_match\", \"value\": accession}},\n        {\"type\": \"terminal\", \"service\": \"text\", \"parameters\": {\"attribute\": \"rcsb_entry_info.nonpolymer_entity_count\", \"operator\": \"greater\", \"value\": 0}}\n    ]}, \"return_type\": \"entry\", \"request_options\": {\"paginate\": {\"start\": 0, \"rows\": 8}, \"sort\": [{\"sort_by\": \"rcsb_entry_info.resolution_combined\", \"direction\": \"asc\"}]}}\n    response = get_json(\"https://search.rcsb.org/rcsbsearch/v2/query\", query)\n    return {\"target\": target, \"pdb_ids\": [item.get(\"identifier\") for item in response.get(\"result_set\", []) if item.get(\"identifier\")]}\nstructure_requests = [search_structures(target) for target in target_candidates]\n\ndef load_entry(target, pdb_id):\n    detail = get_json(\"https://data.rcsb.org/rest/v1/core/entry/\" + pdb_id)\n    info = detail.get(\"rcsb_entry_info\") or {}\n    resolutions = info.get(\"resolution_combined\") or []\n    resolution = min(resolutions) if resolutions else None\n    methods = [item.get(\"method\") for item in detail.get(\"exptl\", []) if item.get(\"method\")]\n    nonpolymer_count = int(info.get(\"nonpolymer_entity_count\") or 0)\n    resolution_quality = max(0.0, min(1.0, (4.5 - float(resolution)) / 3.0)) if resolution is not None else 0.0\n    combined = 0.72 * target[\"evidence_score\"] + 0.20 * resolution_quality + (0.08 if nonpolymer_count > 0 else 0.0)\n    return {\"target_chembl_id\": target[\"target_chembl_id\"], \"target_name\": target[\"target_name\"], \"organism\": target[\"organism\"], \"uniprot_accession\": target[\"uniprot_accession\"], \"pdb_id\": pdb_id, \"resolution_A\": round(float(resolution), 3) if resolution is not None else None, \"experimental_method\": \"; \".join(methods) if methods else \"unknown\", \"nonpolymer_entity_count\": nonpolymer_count, \"selection_score\": round(combined, 6), \"polymer_entity_ids\": (detail.get(\"rcsb_entry_container_identifiers\") or {}).get(\"polymer_entity_ids\") or []}\nstructures = []\nfor request in structure_requests:\n    for pdb_id in request[\"pdb_ids\"][:6]:\n        try:\n            structures.append(load_entry(request[\"target\"], pdb_id))\n        except Exception:\n            pass\nif not structures:\n    raise ValueError(\"No ligand-containing experimental RCSB structure was found for the ranked target candidates\")\nstructures.sort(key=lambda item: (-item[\"selection_score\"], item[\"resolution_A\"] if item[\"resolution_A\"] is not None else 99.0, item[\"pdb_id\"]))\n\ndef mapped_target_chains(structure):\n    chains = []\n    for entity_id in structure.get(\"polymer_entity_ids\", []):\n        try:\n            entity = get_json(\"https://data.rcsb.org/rest/v1/core/polymer_entity/\" + structure[\"pdb_id\"] + \"/\" + str(entity_id))\n        except Exception:\n            continue\n        identifiers = entity.get(\"rcsb_polymer_entity_container_identifiers\") or {}\n        refs = identifiers.get(\"reference_sequence_identifiers\") or []\n        if any(ref.get(\"database_accession\") == structure[\"uniprot_accession\"] for ref in refs):\n            chains.extend(identifiers.get(\"auth_asym_ids\") or [])\n    return {\"chain_ids\": sorted(set(chain for chain in chains if chain))}\n\ndef receptor_preflight(structure, chain_ids):\n    work = tempfile.mkdtemp(prefix=\"receptor_candidate_\", dir=\"/md_project/data\")\n    result = {\"pdb_id\": structure[\"pdb_id\"], \"chain_ids\": chain_ids, \"passed\": False}\n    try:\n        source_cif = os.path.join(work, structure[\"pdb_id\"] + \".cif\")\n        with urllib.request.urlopen(\"https://files.rcsb.org/download/\" + structure[\"pdb_id\"] + \".cif\", timeout=120) as response:\n            with open(source_cif, \"wb\") as fh:\n                fh.write(response.read())\n        fixer = PDBFixer(filename=source_cif)\n        chains = list(fixer.topology.chains())\n        available = [chain.id or str(index) for index, chain in enumerate(chains)]\n        missing = [chain for chain in chain_ids if chain not in available]\n        result[\"available_chains\"] = available\n        if missing:\n            result[\"reason\"] = \"UniProt/SIFTS author chain(s) not exposed by PDBFixer: \" + \",\".join(missing)\n            return result\n        remove_indices = [index for index, chain in enumerate(chains) if (chain.id or str(index)) not in chain_ids]\n        if remove_indices:\n            fixer.removeChains(remove_indices)\n        fixer.findMissingResidues()\n        fixer.missingResidues = {}\n        fixer.findNonstandardResidues()\n        fixer.replaceNonstandardResidues()\n        fixer.removeHeterogens(False)\n        fixer.findMissingAtoms()\n        fixer.addMissingAtoms()\n        fixer.addMissingHydrogens(float(d[\"ph\"]))\n        prepared_pdb = os.path.join(work, \"prepared.pdb\")\n        with open(prepared_pdb, \"w\") as fh:\n            PDBFile.writeFile(fixer.topology, fixer.positions, fh, keepIds=True)\n        receptor_pdbqt = os.path.join(work, \"receptor.pdbqt\")\n        receptor_json = os.path.join(work, \"receptor.json\")\n        cmd = [sys.executable, \"-m\", \"meeko.cli.mk_prepare_receptor\", \"--read_pdb\", prepared_pdb, \"--write_pdbqt\", receptor_pdbqt, \"--write_json\", receptor_json, \"--charge_model\", \"gasteiger\", \"--allow_bad_res\"]\n        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)\n        log_text = (proc.stdout or \"\") + \"\\n\" + (proc.stderr or \"\")\n        result[\"returncode\"] = proc.returncode\n        result[\"log_tail\"] = log_text[-600:]\n        result[\"passed\"] = proc.returncode == 0 and os.path.exists(receptor_pdbqt) and os.path.getsize(receptor_pdbqt) > 0\n        if not result[\"passed\"]:\n            result[\"reason\"] = \"PDBFixer-to-Meeko preparation preflight failed\"\n        return result\n    except Exception as exc:\n        result[\"reason\"] = str(exc)\n        return result\n    finally:\n        shutil.rmtree(work, ignore_errors=True)\n\npreparation_preflight = []\nselected_structure = None\nselected_chains = []\nfor structure in structures[:12]:\n    chain_result = mapped_target_chains(structure)\n    candidate_chains = chain_result[\"chain_ids\"]\n    if not candidate_chains:\n        preparation_preflight.append({\"pdb_id\": structure[\"pdb_id\"], \"chain_ids\": [], \"passed\": False, \"reason\": \"No UniProt/SIFTS author-chain mapping\"})\n        continue\n    check = receptor_preflight(structure, candidate_chains)\n    preparation_preflight.append(check)\n    if check[\"passed\"]:\n        selected_structure = dict(structure)\n        selected_chains = candidate_chains\n        selected_structure[\"chain_ids\"] = candidate_chains\n        selected_structure[\"preparation_preflight\"] = \"PASSED_PDBFIXER_MEEKO\"\n        break\nif selected_structure is None:\n    raise ValueError(\"No ranked receptor structure passed the bounded PDBFixer-to-Meeko preparation preflight\")\nselected_target = next(item for item in target_candidates if item[\"target_chembl_id\"] == selected_structure[\"target_chembl_id\"])\nfor target in target_candidates:\n    matches = [item for item in structures if item[\"target_chembl_id\"] == target[\"target_chembl_id\"]]\n    target[\"best_structure\"] = ({key: value for key, value in matches[0].items() if key != \"polymer_entity_ids\"} if matches else None)\nselected_public = {key: value for key, value in selected_structure.items() if key != \"polymer_entity_ids\"}\nselected_public[\"chain_ids\"] = selected_chains\nd[\"pdb_id\"] = selected_structure[\"pdb_id\"]\nd[\"chain_ids\"] = selected_chains\nd[\"run_name\"] = d[\"pdb_id\"] + \"_\" + d[\"ligand_name\"] + \"_\" + d[\"run_id\"]\nd[\"receptor_selection\"] = {\n    \"mode\": \"auto\",\n    \"status\": \"AUTOMATIC_HYPOTHESIS_SELECTED_FOR_DOCKING\",\n    \"query\": {\"input_smiles\": d[\"smiles\"], \"canonical_smiles\": canonical, \"target_organism\": organism, \"similarity_threshold_percent\": threshold, \"target_candidate_limit\": limit},\n    \"method\": \"ChEMBL ligand-similarity target fishing using organism-matched binding/functional activity evidence, followed by RCSB experimental structure ranking and bounded PDBFixer-to-Meeko preparation preflight.\",\n    \"preparation_preflight\": preparation_preflight,\n    \"candidate_molecules\": molecule_hits,\n    \"candidate_targets\": target_candidates,\n    \"selected\": selected_public,\n    \"rationale\": [\"The selected target had the highest combined ligand-similarity, curated activity-evidence and experimental-structure quality score.\", \"The selected PDB entry contains non-polymer component(s), has recorded experimental resolution, and maps to the target UniProt accession.\", \"Target chain selection used the RCSB UniProt/SIFTS polymer-entity mapping.\", \"The highest-ranked structure that passed an actual PDBFixer-to-Meeko preparation preflight was selected; rejected structures and reasons are retained.\", \"The chosen receptor and chain were passed automatically to PDBFixer, official Meeko receptor preparation and AutoDock Vina.\"],\n    \"limitations\": [\"Ligand-based target fishing generates hypotheses and cannot establish the true biological receptor.\", \"ChEMBL evidence may be sparse, biased toward well-studied chemotypes, or measured in heterogeneous assays.\", \"A high-quality PDB structure may contain engineered mutations, fusion partners, stabilizing ligands or a non-native conformational state.\", \"The selected receptor, pocket and pose require expert review and experimental validation.\"],\n    \"data_sources\": {\"chembl_similarity\": similarity_url, \"chembl_api\": \"https://www.ebi.ac.uk/chembl/api/data/\", \"rcsb_search_api\": \"https://search.rcsb.org/rcsbsearch/v2/query\", \"rcsb_data_api\": \"https://data.rcsb.org/rest/v1/core/\"}\n}\nd[\"qc_flags\"] = sorted(set(list(d.get(\"qc_flags\", [])) + [\"AUTOMATED_RECEPTOR_SELECTION_REQUIRES_REVIEW\"]))\nreturn [{\"json\": d}]",
+        "mode": "runOnceForAllItems"
+      },
+      "id": "pydock-auto-receptor",
+      "name": "Auto Select Receptor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -288,
+        16
+      ],
+      "notes": "Ranks ChEMBL-supported SINGLE PROTEIN targets and RCSB structures, maps target chains via UniProt/SIFTS, then selects the highest-ranked candidate that passes a bounded PDBFixer-to-Meeko preparation preflight. All evidence, rejections and limitations are reported."
+    }
+  ],
+  "connections": {
+    "SMILES Drop (Drive Trigger)": {
+      "main": [
+        [
+          {
+            "node": "Download SMILES File (Drive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download SMILES File (Drive)": {
+      "main": [
+        [
+          {
+            "node": "Extract SMILES Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract SMILES Text": {
+      "main": [
+        [
+          {
+            "node": "Attach Drive Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Drive Metadata": {
+      "main": [
+        [
+          {
+            "node": "Normalize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate 3D Structure": {
+      "main": [
+        [
+          {
+            "node": "Analyze Ligand (Ro5)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Ligand (Ro5)": {
+      "main": [
+        [
+          {
+            "node": "Convert to PDBQT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to PDBQT": {
+      "main": [
+        [
+          {
+            "node": "Prepare Protein",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Protein": {
+      "main": [
+        [
+          {
+            "node": "Run Docking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Docking": {
+      "main": [
+        [
+          {
+            "node": "Parse Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Results": {
+      "main": [
+        [
+          {
+            "node": "Analyze Interactions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Interactions": {
+      "main": [
+        [
+          {
+            "node": "Build MD Handoff Bundle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build MD Handoff Bundle": {
+      "main": [
+        [
+          {
+            "node": "Generate Reports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Reports": {
+      "main": [
+        [
+          {
+            "node": "Build Scientific Report Package",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Scientific Report Package": {
+      "main": [
+        [
+          {
+            "node": "Create Run Folder (Drive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Run Folder (Drive)": {
+      "main": [
+        [
+          {
+            "node": "Create MD Handoff Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create MD Handoff Folder": {
+      "main": [
+        [
+          {
+            "node": "Prepare MD Handoff Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare MD Handoff Files": {
+      "main": [
+        [
+          {
+            "node": "MD Files To Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MD Files To Binary": {
+      "main": [
+        [
+          {
+            "node": "Upload MD Handoff Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload MD Handoff Files": {
+      "main": [
+        [
+          {
+            "node": "Prepare Report Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Report Files": {
+      "main": [
+        [
+          {
+            "node": "Reports To Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reports To Binary": {
+      "main": [
+        [
+          {
+            "node": "Upload Reports (Drive)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Reports (Drive)": {
+      "main": [
+        [
+          {
+            "node": "Build Final Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Final Summary": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Run Workspace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Input": {
+      "main": [
+        [
+          {
+            "node": "Auto Select Receptor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto Select Receptor": {
+      "main": [
+        [
+          {
+            "node": "Generate 3D Structure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true,
+    "executionTimeout": 3600,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": true
+  }
+}

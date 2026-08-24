@@ -1,0 +1,14 @@
+name: n8n-drug-prep-docking
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - rdkit=2026.03.5
+  - openmm=8.6
+  - pdbfixer
+  - vina=1.2.7
+  - gemmi
+  - pip
+  - pip:
+      - meeko==0.7.1
