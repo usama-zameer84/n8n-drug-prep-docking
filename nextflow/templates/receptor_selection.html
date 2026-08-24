@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Receptor selection — $ligand_name</title>
+  <style>
+    body { font-family: system-ui; margin: 2rem; }
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 4px 8px; }
+  </style>
+</head>
+<body>
+  <h1>Receptor selection report</h1>
+  <h2>Selected</h2>
+  <p><strong>PDB:</strong> $pdb_id · <strong>Chains:</strong> $chains · <strong>Score:</strong> $selection_score</p>
+  <h2>Candidate targets</h2>
+  <table><thead><tr><th>ChEMBL</th><th>Name</th><th>UniProt</th><th>Score</th></tr></thead><tbody>$candidate_rows</tbody></table>
+  <h2>Preparation preflight</h2>
+  <table><thead><tr><th>PDB</th><th>Chains</th><th>Passed</th><th>Reason</th></tr></thead><tbody>$preflight_rows</tbody></table>
+  <p><small>$method</small></p>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Docking report — $ligand_name</title>
+  <style>
+    body { font-family: system-ui; margin: 2rem; max-width: 900px; }
+    table { border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+    th { background: #f4f4f4; }
+    .qc { background: #fff3cd; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Docking report</h1>
+  <p>Run <code>$run_id</code></p>
+  <table><tbody>$table_rows</tbody></table>
+  <div class="qc"><strong>QC flags:</strong> $qc_flags</div>
+  <p>See <a href="03a_receptor_selection.html">receptor-selection report</a> and <a href="09_visualization.html">docking visualization</a>.</p>
+  <p><small>Docking scores rank poses; they do not measure binding. The MD handoff contains structures only.</small></p>
+</body>
+</html>

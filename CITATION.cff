@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this workflow, cite this repository and the underlying scientific software."
-title: "n8n Drug Preparation and Docking"
+title: "Drug Preparation and Docking"
 type: software
 authors:
   - family-names: "Zameer"

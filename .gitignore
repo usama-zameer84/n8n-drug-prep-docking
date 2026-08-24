@@ -1,14 +1,61 @@
+# Operating-system and editor files
 .DS_Store
+.AppleDouble
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Secrets and machine-specific configuration
 .env
 .env.*
-.mcp.json
+!.env.example
 credentials.json
+*.local.config
+
+# Python environments, caches, and build output
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.tox/
 .venv/
 venv/
+build/
+dist/
+*.egg-info/
+
+# JavaScript dependencies
+node_modules/
+
+# Nextflow state and generated scientific output
+.nextflow/
+/.nextflow.log*
+work/
+results/
 output/
 reports/
 md_project/
-*.log
+slurm-*.out
+/report.html
+/timeline.html
+/trace.txt
+/dag.dot
+/dag.svg
+
+# Test and lint output
+.ruff_cache/
+/.coverage
+/.coverage.*
+/coverage.xml
+/htmlcov/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+nohup.out

@@ -1,14 +1,21 @@
 name: n8n-drug-prep-docking
 channels:
   - conda-forge
+  - bioconda
 dependencies:
   - python=3.12
   - numpy
-  - rdkit=2026.03.5
+  # This series resolves against the libboost version used by Vina 1.2.7.
+  - rdkit=2026.03
   - openmm=8.6
   - pdbfixer
   - vina=1.2.7
   - gemmi
+  # Workflow runtime and the checksum utility used by the handoff manifest.
+  - nextflow
+  - openjdk=17
+  - coreutils
+  - ruff
   - pip
   - pip:
       - meeko==0.7.1

@@ -1,6 +1,8 @@
 # Output reference
 
-Every successful run creates one report folder and one `MD_Handoff` subfolder in Google Drive.
+Every successful run creates one report package and an `MD_Handoff` subfolder. Nextflow writes
+them under `results/<ligand_id>/package/`. n8n uploads them to the configured Google Drive
+reports folder.
 
 ## Report folder
 
@@ -46,9 +48,14 @@ Contains the complete report object in readable JSON. Use `run_summary.json` or 
 
 ### `09_visualization.html`
 
-Loads the prepared receptor and every best pose in the matching receptor-profile registry. Controls show or hide individual ligands. The table records ligand name, run ID, color, Vina score, and box source.
+Nextflow embeds the selected receptor backbone, selected ligand pose, pose-score table, and its
+renderer in the HTML file. It opens directly from disk without network access. Drag rotates the
+structure, the mouse wheel zooms, and Reset view restores the initial orientation.
 
-The viewer needs network access to load 3Dmol.js. The SDF and PDB files remain the portable source data.
+n8n embeds the receptor and matching receptor-profile poses, with controls for showing or
+hiding ligands. Its page loads 3Dmol.js from the public CDN and therefore needs internet access.
+
+The SDF and PDB files remain the authoritative structure data for both runners.
 
 ### Overlay artifacts
 
@@ -57,7 +64,7 @@ The viewer needs network access to load 3Dmol.js. The SDF and PDB files remain t
 | `receptor_overlay_reference.pdb` | Exact prepared receptor used for the overlay group |
 | `all_best_poses.sdf` | Concatenated best-pose SDF records |
 | `ligand_overlay.json` | Receptor profile and per-pose metadata |
-| `run_summary.json` | Compact run and Drive delivery summary |
+| `run_summary.json` | Compact run status, score, receptor selection, QC, and delivery summary |
 
 The overlay key includes the RCSB source hash, selected chains, heterogen policy, and pH. Structures with a different preparation profile are placed in a different group.
 

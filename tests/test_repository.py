@@ -10,7 +10,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = ROOT / "workflow" / "drug-prep-docking.workflow.json"
+N8N = ROOT / "n8n"
+WORKFLOW_PATH = N8N / "workflow" / "drug-prep-docking.workflow.json"
 
 
 class RepositoryTests(unittest.TestCase):
@@ -48,22 +49,22 @@ class RepositoryTests(unittest.TestCase):
     def test_code_node_exports_match(self):
         result = subprocess.run(
             [sys.executable, "tools/extract_code_nodes.py", "--check"],
-            cwd=ROOT,
+            cwd=N8N,
             capture_output=True,
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        manifest = json.loads((ROOT / "scripts" / "manifest.json").read_text())
+        manifest = json.loads((N8N / "scripts" / "manifest.json").read_text())
         self.assertEqual(manifest["code_node_count"], 17)
 
     def test_python_exports_parse(self):
-        for path in sorted((ROOT / "scripts" / "python").glob("*.py")):
+        for path in sorted((N8N / "scripts" / "python").glob("*.py")):
             with self.subTest(path=path.name):
                 ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is not installed")
     def test_javascript_exports_parse(self):
-        for path in sorted((ROOT / "scripts" / "javascript").glob("*.js")):
+        for path in sorted((N8N / "scripts" / "javascript").glob("*.js")):
             with self.subTest(path=path.name):
                 result = subprocess.run(
                     ["node", "--check", str(path)],
@@ -98,11 +99,54 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn(name, handoff_source)
 
     def test_repository_hygiene(self):
-        blocked_names = {".mcp.json", ".env", "credentials.json"}
-        for path in ROOT.rglob("*"):
-            if ".git" in path.parts or path.is_dir():
-                continue
+        blocked_names = {".DS_Store", ".env", "credentials.json"}
+        blocked_directories = {
+            ".nextflow",
+            ".ruff_cache",
+            "__pycache__",
+            "node_modules",
+            "results",
+            "work",
+        }
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        )
+        publication_candidates = [
+            Path(raw.decode()) for raw in result.stdout.split(b"\0") if raw
+        ]
+        for path in publication_candidates:
             self.assertNotIn(path.name, blocked_names)
+            self.assertFalse(
+                blocked_directories.intersection(path.parts),
+                f"generated path is publishable: {path}",
+            )
+
+        for ignored in (
+            ".DS_Store",
+            ".env",
+            ".idea/workspace.xml",
+            ".nextflow/history",
+            ".nextflow.log.1",
+            "report.html",
+            "node_modules/package/index.js",
+            "work/task/file",
+            "results/run/file",
+            ".ruff_cache/cache",
+        ):
+            check = subprocess.run(
+                ["git", "check-ignore", "--quiet", ignored], cwd=ROOT
+            )
+            self.assertEqual(check.returncode, 0, f"expected Git to ignore {ignored}")
+
+    def test_manifest_paths_resolve_under_n8n(self):
+        manifest = json.loads((N8N / "scripts" / "manifest.json").read_text())
+        self.assertEqual(manifest["code_node_count"], len(manifest["nodes"]))
+        for node in manifest["nodes"]:
+            with self.subTest(node=node["node"]):
+                self.assertTrue((N8N / node["file"]).is_file())
 
 
 if __name__ == "__main__":
